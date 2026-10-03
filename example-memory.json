@@ -1,0 +1,14 @@
+{
+  "format": "conversation-memory",
+  "version": 1,
+  "producer": { "name": "example", "version": "1.0.0" },
+  "subject": { "id": "example-alan", "name": "阿岚", "userName": "小梨" },
+  "externalActivityIds": [],
+  "activities": [
+    { "id": "example-floor-1", "charId": "example-alan", "kind": "activity_log", "module": "chat", "summary": "我和小梨一起去医院，讨论了治疗方案。", "state": "consolidated", "sourceOrder": 1, "sourceRefs": ["example:chat:floor:1"], "consolidatedInto": "example-hospital", "at": 0, "occurredAt": 0, "timeUnknown": true }
+  ],
+  "periods": [
+    { "id": "example-hospital", "charId": "example-alan", "kind": "period_block", "state": "active", "summary": "时期: 剧情时间未知\n经历:\n  - 第1楼｜我和小梨一起去医院，讨论了治疗方案。", "eventSummary": "我和小梨一起去医院，讨论了治疗方案。", "activityRefs": ["example-floor-1"], "sourceRefs": ["example:chat:floor:1"], "timeLabel": "剧情时间未知", "timeUnknown": true, "occurredAt": 0, "at": 0, "periodStart": null, "periodEnd": null, "digestionState": "undigested", "facts": [{ "id": "example-fact", "text": "我和小梨一起去医院。", "kind": "event", "status": "completed", "entityTerms": ["医院"], "evidenceIds": ["example-floor-1"], "timeUnknown": true, "occurredAt": 0 }] }
+  ],
+  "cores": []
+}

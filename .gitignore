@@ -1,0 +1,7 @@
+.env
+.env.*
+*.log
+*.zip
+node_modules/
+conversation-memory.json
+.DS_Store

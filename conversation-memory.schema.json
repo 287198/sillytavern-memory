@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Conversation Memory v1",
+  "type": "object",
+  "required": ["format", "version", "subject", "activities", "periods", "cores"],
+  "properties": {
+    "format": { "const": "conversation-memory" },
+    "version": { "const": 1 },
+    "exportedAt": { "type": "string" },
+    "producer": { "type": "object", "properties": { "name": { "type": "string" }, "version": { "type": "string" } } },
+    "subject": { "type": "object", "required": ["id"], "properties": {
+      "id": { "type": "string", "minLength": 1, "maxLength": 120 }, "name": { "type": "string" }, "userName": { "type": "string" },
+      "source": { "type": "object", "properties": { "application": { "type": "string" }, "characterId": { "type": "string" }, "chatId": { "type": "string" } } }
+    } },
+    "externalActivityIds": { "$ref": "#/$defs/refs" },
+    "activities": { "type": "array", "items": { "allOf": [{ "$ref": "#/$defs/record" }, { "required": ["summary"], "properties": { "kind": { "const": "activity_log" }, "summary": { "type": "string", "minLength": 1 } } }] } },
+    "periods": { "type": "array", "items": { "allOf": [{ "$ref": "#/$defs/record" }, { "required": ["summary"], "properties": { "kind": { "const": "period_block" }, "summary": { "type": "string", "minLength": 1 } } }] } },
+    "cores": { "type": "array", "items": { "allOf": [{ "$ref": "#/$defs/record" }, { "properties": { "kind": { "const": "digested_block" }, "items": { "type": "array", "items": { "type": "object", "required": ["id", "text"], "properties": { "id": { "type": "string", "minLength": 1 }, "text": { "type": "string", "minLength": 1 }, "locked": { "type": "boolean" }, "pinned": { "type": "boolean" }, "transferOrigin": { "$ref": "#/$defs/origin" } } } } } }] } }
+  },
+  "$defs": {
+    "refs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "timestamp": { "type": ["number", "null"], "minimum": 0 },
+    "origin": { "type": "object", "required": ["subjectId", "id"], "properties": { "subjectId": { "type": "string", "minLength": 1, "maxLength": 120 }, "id": { "type": "string", "minLength": 1, "maxLength": 160 } } },
+    "record": {
+      "type": "object", "required": ["id", "charId", "kind"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 }, "charId": { "type": "string", "minLength": 1, "maxLength": 120 }, "kind": { "type": "string" },
+        "summary": { "type": "string" }, "eventSummary": { "type": "string" }, "scope": { "type": "string" }, "state": { "type": "string" },
+        "sourceRefs": { "$ref": "#/$defs/refs" }, "activityRefs": { "$ref": "#/$defs/refs" }, "blockRefs": { "$ref": "#/$defs/refs" },
+        "sourceContext": { "type": "object", "properties": { "application": { "type": "string" }, "characterId": { "type": "string" }, "chatId": { "type": "string" } } },
+        "sourceIndex": { "type": "integer", "minimum": 0 }, "sourceSwipe": { "type": "integer", "minimum": 0 }, "sourceOrder": { "type": "integer", "minimum": 1 },
+        "transferOrigin": { "$ref": "#/$defs/origin" }, "timeUnknown": { "type": "boolean" }, "locked": { "type": "boolean" }, "pinned": { "type": "boolean" },
+        "timeLabel": { "type": "string" }, "at": { "$ref": "#/$defs/timestamp" }, "occurredAt": { "$ref": "#/$defs/timestamp" },
+        "recordedAt": { "$ref": "#/$defs/timestamp" }, "knownAt": { "$ref": "#/$defs/timestamp" }, "createdAt": { "$ref": "#/$defs/timestamp" }, "updatedAt": { "$ref": "#/$defs/timestamp" },
+        "periodStart": { "$ref": "#/$defs/timestamp" }, "periodEnd": { "$ref": "#/$defs/timestamp" }, "timeAnchors": { "type": "array" },
+        "facts": { "type": "array", "items": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "minLength": 1 }, "evidenceIds": { "$ref": "#/$defs/refs" }, "sourceActivityIds": { "$ref": "#/$defs/refs" } } } }
+      },
+      "allOf": [{ "if": { "required": ["timeUnknown"], "properties": { "timeUnknown": { "const": true } } }, "then": { "properties": { "occurredAt": { "enum": [0, null] } } } }]
+    }
+  }
+}

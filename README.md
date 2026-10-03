@@ -29,6 +29,8 @@ git -C data/default-user/extensions/sillytavern-memory pull --ff-only
 3. 填写**独立总结 API** 的地址、密钥和模型。支持 OpenAI 兼容 Chat Completions 接口，例如 `https://你的服务/v1`。服务须允许酒馆页面跨域请求；插件不使用主聊天 API 的连接、密钥或模型。
 4. 密钥默认只保留在当前页面会话。明确勾选「保存密钥到酒馆设置」后才持久保存；记忆 JSON 始终不包含密钥。
 
+「测试连接并获取模型」会在按钮旁显示请求进度、成功或具体错误，最多等待 20 秒。获取成功后用「选择总结模型」下拉选择，自动填入模型字段；不支持 `/models` 的服务仍可手动填写。取得列表只验证模型列表接口，不代表生成接口已经通过测试。
+
 目录和扩展入口遵循 [SillyTavern 官方扩展文档](https://docs.sillytavern.app/for-contributors/writing-extensions/)。也可在本地开发时放入 `public/scripts/extensions/third-party/`；不要同时安装两份。
 
 manifest 声明最低客户端版本 1.13.5；目前已按官方 release 接口检查并通过模拟酒馆环境的真实浏览器测试，尚未在用户实际酒馆安装环境验收。
@@ -62,6 +64,10 @@ manifest 声明最低客户端版本 1.13.5；目前已按官方 release 接口�
 
 摘要提取先尝试 JSON 字段路径，再尝试正则第一个捕获组，未命中才使用整楼正文。示例：
 
+0.2.0 起，新配置默认开启「自动识别当前摘要格式」：只读检查当前允许启用的全局/角色/预设正则、当前预设的输出标签，以及最近 40 条角色存储消息。单一格式有实际命中时自动填入提取字段，并显示来源和预览；多个格式时从「识别到的摘要格式」选择。预设只有格式约定、历史尚无命中时展示候选，不把它当成已存在摘要。普通 `<summary>` 折叠栏标题、思维链和状态栏不会作为可靠摘要。
+
+切换聊天、预设、角色生成完成或点击识别按钮时重新检查。手动编辑提取规则会关闭自动识别并保留配置；升级前已有手动规则同样保留。自动识别不运行正则替换、不改预设或聊天，也不能恢复已删除的原文。复杂宏、非标准标签或无法确认的格式可继续手动设置。
+
 ```text
 摘要正则：<memory_summary>([\s\S]*?)</memory_summary>
 摘要 JSON 字段路径：memory.summary
@@ -93,7 +99,20 @@ manifest 声明最低客户端版本 1.13.5；目前已按官方 release 接口�
 
 文件是 UTF-8 普通 `.json`，公开契约见 [JSON-FORMAT.md](JSON-FORMAT.md)、[JSON Schema](conversation-memory.schema.json) 和 [可导入示例](example-memory.json)。这不是完整聊天备份，也不包含 API 配置、向量缓存或内部数据库 key。
 
-当前实现双向文件交换。后续 CDN 转发、一键聊天记录同步、云端传输、群聊和向量服务暂未接入。
+当前实现双向文件交换和可选向量增强召回。后续 CDN 转发、一键聊天记录同步、云端传输和群聊暂未接入。
+
+## 向量模型与语义召回
+
+打开「向量模型与语义召回」，配置独立的 API 地址、密钥和 embedding 模型：
+
+1. 点击「获取向量模型列表」，从下拉列表选择，或手动填写服务支持的 embedding 模型。列表可能包含普通聊天模型，不能凭列表名字保证向量能力。
+2. 点击「测试向量接口」，验证 `/embeddings` 能返回有效向量并显示维度。
+3. 先总结或导入记忆，再点击「建立/更新向量索引」，最后勾选「启用向量增强召回」。
+4. 新增、导入或编辑记忆后，再点击更新；已存在且内容相同的索引复用。如果服务在同一模型名称下更换了向量维度，可点「重建全部向量」强制更新。
+
+向量功能默认关闭。开启后，沿用眠眠机的召回排序规则，只在事件/核心的词法命中不足时使用向量补充，不直接取代核心与来源保护规则。索引包含当前聊天的有效事件和核心；每条向量输入最多取 6000 字符，每次最多 16 条，不截断保存的记忆。接口会收到选取的记忆文本和本次检索主题。主聊天仍使用酒馆原有连接，向量接口不隐式复用总结或主聊天密钥。
+
+向量缓存独立保存在当前浏览器 IndexedDB，按当前聊天、接口、模型及来源内容区分；旧内容索引不参与修改后记忆的检索。无索引、接口失败或维度变化时继续词法召回，并在向量面板说明原因。实时查询最多等待 12 秒；索引操作沿用所配超时。缓存与密钥不随 JSON 导出，跨设备导入后需要重新建立索引。未勾选保存向量密钥时，刷新页面后需重新填写。
 
 ## 致谢与来源
 
@@ -108,7 +127,7 @@ manifest 声明最低客户端版本 1.13.5；目前已按官方 release 接口�
 ```text
 node scripts/build-sillytavern-memory-plugin.js
 node scripts/build-sillytavern-memory-plugin.js --check
-node --test scripts/memory-transfer.test.js scripts/memory-sillytavern-engine.test.js scripts/memory-sillytavern-api.test.js
+node --test scripts/memory-transfer.test.js scripts/memory-sillytavern-engine.test.js scripts/memory-sillytavern-api.test.js scripts/memory-sillytavern-adapter.test.js scripts/memory-sillytavern-vector.test.js
 node scripts/memory-sillytavern-browser.test.js
 ```
 

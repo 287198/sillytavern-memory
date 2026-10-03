@@ -1,13 +1,18 @@
 import './shared.js';
 import './engine.js';
 import './api.js';
+import './summary-adapter.js';
+import './vector.js';
 
 const E = globalThis.ConversationMemoryEngine;
 const R = globalThis.ConversationMemoryRules;
 const API = globalThis.ConversationMemoryAPI;
+const Summary = globalThis.ConversationMemorySummary;
+const vectors = globalThis.ConversationMemoryVector.create({api:API});
 const SLOT = 'conversation_memory';
 let activeKey = '', state = null, controller = null, box = null, sessionKey = '', generation = 0, job = false;
 let lastRecall = '', pendingImport = null, editId = '', page = 0, failurePage = 0, autoTimer = null, generating = false, enabled = true, jobCancelled = false;
+let sessionVectorKey = '', regexModule = null, detectionToken = 0, detectionCandidates = [];
 const context = () => SillyTavern.getContext();
 const database = new Promise((resolve, reject) => {
   const request = indexedDB.open('ConversationMemoryPlugin', 1);
@@ -40,7 +45,49 @@ function identity() {
 function settings() {
   const ctx = context();
   const cfg = ctx.extensionSettings[SLOT] || {};
-  return { ...E.defaults, ...cfg, apiKey: sessionKey || cfg.apiKey || '', characterName: ctx.name2, userName: ctx.name1 };
+  return { ...E.defaults, vectorMinScore:0.45, ...cfg, autoSummary:cfg.autoSummary??(!cfg.summaryPattern&&!cfg.summaryPath||Boolean(cfg.summaryAutoSelection)), apiKey: sessionKey || cfg.apiKey || '', characterName: ctx.name2, userName: ctx.name1 };
+}
+function vectorSettings() { const cfg=settings();return {...cfg,apiLabel:'向量',apiUrl:cfg.vectorApiUrl||'',apiKey:sessionVectorKey||cfg.vectorApiKey||'',model:cfg.vectorModel||''}; }
+function vectorStatus(text) { if(box)box.querySelector('[data-cm-vector-status]').textContent=text; }
+async function recallMemory(query) {
+  const key=activeKey, memory=state, stamp=memoryStamp(state), cfg=settings(), connection=vectorSettings();
+  const vector=cfg.vectorEnabled ? {search:request=>vectors.search({...request,settings:connection})} : undefined;
+  const result=await E.recall(memory,query,cfg,vector);
+  if(!enabled||identity()!==key||!state||memoryStamp(state)!==stamp)throw Error('聊天或记忆来源已变化，本次召回已取消');
+  if(cfg.vectorEnabled && (!settings().vectorEnabled||JSON.stringify([vectorSettings().apiUrl,vectorSettings().model,vectorSettings().apiKey])!==JSON.stringify([connection.apiUrl,connection.model,connection.apiKey])))return E.recall(memory,query,settings());
+  if(cfg.vectorEnabled)vectorStatus(result.route==='vector'?'本次使用向量增强召回。'+(result.vectorReason||''):'本次使用本地词法召回。'+(result.vectorReason||''));
+  return result;
+}
+async function refreshDetection() {
+  if(!box)return;
+  const token=++detectionToken, ctx=context();let manager,preset={},scripts=[];
+  try { manager=ctx.getPresetManager?.();preset=manager?.getPresetSettings?.(manager.getSelectedPresetName())||{}; } catch {}
+  try {
+    if(ctx.getRegexScripts)scripts=ctx.getRegexScripts({allowedOnly:true});
+    else { regexModule ||= import('/scripts/extensions/regex/engine.js').catch(()=>null);const module=await regexModule;
+      if(module?.getRegexScripts)scripts=module.getRegexScripts({allowedOnly:true});
+      else {
+        scripts=[...(ctx.extensionSettings.regex||[])];
+        const character=ctx.characters?.[ctx.characterId];
+        if(ctx.extensionSettings.character_allowed_regex?.includes(character?.avatar))scripts.push(...(character.data?.extensions?.regex_scripts||[]));
+        if(manager && ctx.extensionSettings.preset_allowed_regex?.[manager.apiId]?.includes(manager.getSelectedPresetName()))scripts.push(...(manager.readPresetExtensionField({path:'regex_scripts'})||[]));
+      }
+    }
+  } catch {}
+  if(token!==detectionToken||identity()!==activeKey)return;
+  detectionCandidates=Summary.detect({scripts,messages:chat(),preset});
+  const selector=box.querySelector('[data-cm-summary-candidate]');selector.replaceChildren();
+  const placeholder=node('option',detectionCandidates.length?'选择已识别的摘要格式':'尚未识别到摘要格式，继续使用正文');placeholder.value='';selector.append(placeholder);
+  detectionCandidates.forEach((row,i)=>{const option=node('option',`${row.label} · ${row.matches} 楼命中`);option.value=String(i);selector.append(option);});
+  selector.disabled=!detectionCandidates.length;
+  const cfg=ctx.extensionSettings[SLOT] ||= {}, matched=detectionCandidates.filter(row=>row.matches>0);
+  if(settings().autoSummary) {
+    const chosen=matched.length===1?matched[0]:null;
+    cfg.summaryPattern=chosen?.pattern||'';cfg.summaryPath=chosen?.path||'';cfg.summaryAutoSelection=chosen?.label||'';cfg.autoSummary=true;
+    for(const key of ['summaryPattern','summaryPath'])box.querySelector(`[data-setting="${key}"]`).value=cfg[key];
+    ctx.saveSettingsDebounced();
+    box.querySelector('[data-cm-detection]').textContent=chosen?`已自动填入 ${chosen.label}；${chosen.matches} 楼命中。预览：${chosen.preview.slice(0,200)}`:matched.length>1?'检测到多个有效摘要格式，请从上方选择；选择前使用正文。':detectionCandidates.length?'已识别预设中的摘要约定，但历史消息尚无命中；可选择格式，或待新楼生成后自动识别。':'没有可靠的摘要格式证据，继续总结正文。';
+  } else box.querySelector('[data-cm-detection]').textContent=`保留手动配置。发现 ${detectionCandidates.length} 个候选；启用自动识别或从上方选择可填入。`;
 }
 function chat() {
   const ctx = context();
@@ -91,13 +138,39 @@ function button(text, action, parent) {
 function field(parent, key, label, type = 'text', hint = '') {
   const wrap = node('label', null, 'cm-field'); const span = node('span', label); wrap.append(span);
   const input = node('input'); input.type = type; input.dataset.setting = key; input.className = 'text_pole';
+  input.setAttribute('aria-label',label);
   if (type === 'checkbox') input.checked = Boolean(settings()[key]); else input.value = settings()[key] ?? '';
-  if (type === 'password') { input.autocomplete = 'off'; input.value = sessionKey || context().extensionSettings[SLOT]?.apiKey || ''; }
+  if (type === 'password') { input.autocomplete = 'off'; input.value = key==='vectorApiKey'?sessionVectorKey||context().extensionSettings[SLOT]?.vectorApiKey||'':sessionKey || context().extensionSettings[SLOT]?.apiKey || ''; }
   if (type === 'number') { input.min = ['contextFloors', 'depth', 'anchorFloor'].includes(key) ? '0' : '1'; input.step = '1'; }
   wrap.append(input); if (hint) wrap.append(node('small', hint)); parent.append(wrap); return input;
 }
 function details(parent, title, open = false) {
   const d = node('details'); d.open = open; d.append(node('summary', title)); const body = node('div', null, 'cm-fields'); d.append(body); parent.append(d); return body;
+}
+function connectionControls(parent, kind, modelKey, action) {
+  const wrap = node('label', kind === 'summary' ? '选择总结模型' : '选择向量模型', 'cm-field');
+  const select = node('select'); select.className = 'text_pole'; select.dataset.cmModel = kind; select.disabled = true; select.setAttribute('aria-label',kind === 'summary' ? '选择总结模型' : '选择向量模型');
+  const option = node('option','先获取模型列表，也可在下面手动填写'); option.value = ''; select.append(option); wrap.append(select); parent.append(wrap);
+  select.addEventListener('change', () => { if (!select.value) return; const input = box.querySelector(`[data-setting="${modelKey}"]`); input.value = select.value; updateSetting({target:input}); });
+  button(kind === 'summary' ? '测试连接并获取模型' : '获取向量模型列表', action, parent);
+  const status = node('div'); status.dataset.cmConnection = kind; status.setAttribute('role','status'); status.setAttribute('aria-live','polite'); status.append(node('p','填写接口地址和密钥后获取模型，或手动填写服务提供的模型名称。')); parent.append(status);
+}
+function connectionStatus(kind,text) { box.querySelector(`[data-cm-connection="${kind}"] p`).textContent = text; }
+async function fetchModels(btn,kind = 'summary') {
+  const cfg = settings(), key = kind === 'summary' ? 'model' : 'vectorModel';
+  const snapshot = kind === 'summary' ? cfg : vectorSettings();
+  const signature = config => JSON.stringify([config.apiUrl,config.apiKey]);
+  btn.disabled = true; connectionStatus(kind,'正在连接并获取模型…最多等待 20 秒。');
+  try {
+    const ids = await API.models({...snapshot,timeout:Math.min(Number(snapshot.timeout)||90,20)});
+    if (signature(kind === 'summary' ? settings() : vectorSettings()) !== signature(snapshot)) throw new Error('连接配置已变化，请重新获取模型');
+    const select = box.querySelector(`[data-cm-model="${kind}"]`); select.replaceChildren();
+    const empty = node('option',ids.length ? '请选择模型' : '没有返回模型，请手动填写'); empty.value = ''; select.append(empty);
+    for (const id of ids) { const option = node('option',id); option.value = id; select.append(option); }
+    select.disabled = !ids.length; select.value = ids.includes(settings()[key]) ? settings()[key] : '';
+    connectionStatus(kind,ids.length ? `连接成功，获取 ${ids.length} 个模型。请从上方下拉列表选择。` : '服务未返回模型列表，可手动填写模型名称；连接测试尚未验证生成或向量能力。');
+  } catch(error) { connectionStatus(kind,E.failureReason(error,snapshot)); }
+  finally { btn.disabled = false; }
 }
 function shell() {
   if (document.getElementById('conversation-memory')) return;
@@ -115,8 +188,17 @@ function shell() {
   const connect = details(body, '独立总结 API', true);
   field(connect, 'apiUrl', 'API 地址', 'url', 'OpenAI 兼容地址，例如 https://服务地址/v1。需要服务允许浏览器跨域。');
   field(connect, 'apiKey', 'API Key', 'password'); field(connect, 'saveKey', '保存密钥到酒馆设置', 'checkbox', '未勾选时密钥仅在本次页面会话中使用。');
-  field(connect, 'model', '模型'); field(connect, 'maxTokens', '输出 token 上限', 'number'); field(connect, 'timeout', '请求超时秒数', 'number');
-  button('测试连接并获取模型', 'models', connect); const models = node('datalist'); models.id = 'cm-models'; connect.append(models); connect.querySelector('[data-setting="model"]').setAttribute('list', models.id);
+  connectionControls(connect,'summary','model','models');
+  field(connect, 'model', '模型', 'text', '下拉选择会自动填入；服务不支持模型列表时可以手动填写。'); field(connect, 'maxTokens', '输出 token 上限', 'number'); field(connect, 'timeout', '请求超时秒数', 'number');
+  const vectorPanel=details(body,'向量模型与语义召回');
+  field(vectorPanel,'vectorEnabled','启用向量增强召回','checkbox','词法命中不足时，用已建立的向量索引补充语义召回。记忆摘要和查询会发送到你配置的向量接口。');
+  field(vectorPanel,'vectorApiUrl','向量 API 地址','url','OpenAI 兼容 embeddings 接口，例如 https://服务地址/v1。');
+  field(vectorPanel,'vectorApiKey','向量 API Key','password');field(vectorPanel,'vectorSaveKey','保存向量密钥到酒馆设置','checkbox');
+  connectionControls(vectorPanel,'vector','vectorModel','vector-models');field(vectorPanel,'vectorModel','向量模型','text','选择服务提供的 embedding 模型；模型列表可包含非向量模型，需确认接口支持 embeddings。');
+  const score=field(vectorPanel,'vectorMinScore','向量相似度阈值','number');score.min='0';score.max='1';score.step='0.05';
+  button('测试向量接口','vector-test',vectorPanel);button('建立/更新向量索引','vector-index',vectorPanel);
+  button('重建全部向量','vector-rebuild',vectorPanel);
+  const vectorInfo=node('p','先配置向量连接并测试，再建立索引。新增、导入或编辑记忆后点击更新；失败保留本地召回。');vectorInfo.dataset.cmVectorStatus='';vectorInfo.setAttribute('role','status');vectorPanel.append(vectorInfo);
   const counting = details(body, '楼层与注入设置');
   field(counting, 'triggerFloors', '自动总结触发楼数', 'number'); field(counting, 'batchFloors', '每批总结楼数', 'number');
   field(counting, 'historyFloors', '回复历史楼数', 'number', '最近历史楼数，当前输入另外保留一次；只影响本次请求，不删除聊天。');
@@ -126,6 +208,10 @@ function shell() {
   for (const [value,label] of [[1,'聊天内（按深度）'],[0,'主提示后'],[2,'主提示前']]) { const option = node('option',label); option.value = value; position.append(option); }
   position.value = settings().position; positionLabel.append(position); counting.append(positionLabel);
   const extracting = details(body, '摘要与剧情时间提取');
+  field(extracting,'autoSummary','自动识别当前摘要格式','checkbox','只读检查当前启用正则、预设和聊天证据；手动编辑提取规则会关闭自动识别。');button('识别当前预设与正则','detect-summary',extracting);
+  const candidateLabel=node('label','识别到的摘要格式','cm-field'),candidate=node('select');candidate.className='text_pole';candidate.dataset.cmSummaryCandidate='';candidate.setAttribute('aria-label','识别到的摘要格式');candidateLabel.append(candidate);extracting.append(candidateLabel);
+  candidate.addEventListener('change',()=>{const row=detectionCandidates[Number(candidate.value)];if(candidate.value===''||!row)return;const cfg=context().extensionSettings[SLOT] ||= {};cfg.summaryPattern=row.pattern;cfg.summaryPath=row.path;cfg.autoSummary=false;cfg.summaryAutoSelection='';box.querySelector('[data-setting="autoSummary"]').checked=false;for(const key of ['summaryPattern','summaryPath'])box.querySelector(`[data-setting="${key}"]`).value=cfg[key];context().saveSettingsDebounced();box.querySelector('[data-cm-detection]').textContent=`已填入 ${row.label}。预览：${row.preview.slice(0,200)||'历史中尚无命中'}；之后保留此选择，可重新启用自动识别。`;});
+  const detectionInfo=node('p');detectionInfo.dataset.cmDetection='';detectionInfo.setAttribute('role','status');extracting.append(detectionInfo);
   field(extracting, 'summaryPattern', '摘要正则', 'text', '使用第一个捕获组，例如 <memory_summary>([\\s\\S]*?)</memory_summary>。');
   field(extracting, 'summaryPath', '摘要 JSON 字段路径', 'text', '例如 memory.summary；不填写则使用正则或正文。');
   field(extracting, 'timePattern', '时间正则', 'text', '例如 <time>(.*?)</time>；可从状态栏取得日期。');
@@ -176,12 +262,16 @@ function updateSetting(event) {
   const value = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value.trim();
   if (input.type === 'number' && (!Number.isFinite(value) || value < Number(input.min || 0))) return;
   if (key === 'saveKey' && !value) sessionKey = sessionKey || cfg.apiKey || '';
-  if (key === 'apiKey') sessionKey = input.value; else cfg[key] = value;
+  if (key === 'vectorSaveKey' && !value) sessionVectorKey = sessionVectorKey || cfg.vectorApiKey || '';
+  if (key === 'apiKey') sessionKey = input.value; else if(key==='vectorApiKey')sessionVectorKey=input.value;else cfg[key] = value;
   if (key === 'realTime') cfg.dateMode = value ? 'real' : 'story';
   if (cfg.saveKey) cfg.apiKey = key === 'apiKey' ? input.value : sessionKey || cfg.apiKey || ''; else delete cfg.apiKey;
+  if(cfg.vectorSaveKey)cfg.vectorApiKey=key==='vectorApiKey'?input.value:sessionVectorKey||cfg.vectorApiKey||'';else delete cfg.vectorApiKey;
+  if(['summaryPattern','summaryPath'].includes(key)){cfg.autoSummary=false;cfg.summaryAutoSelection='';box.querySelector('[data-setting="autoSummary"]').checked=false;}
   ctx.saveSettingsDebounced();
   if (key === 'inject' && !value) clearInjection();
   if (key === 'auto') scheduleAuto();
+  if(key==='autoSummary')refreshDetection().catch(error=>notice(error.message));
 }
 function renderStatus() {
   if (!box) return;
@@ -265,21 +355,35 @@ async function handle(btn) {
   const action = btn.dataset.action;
   if (action === 'pause') { jobCancelled = true; controller?.pause(); notice('已请求暂停，等待当前请求结束；已保存的批次保留。'); return; }
   if (action === 'models') {
-    notice('正在测试独立总结连接…'); const ids = await API.models(settings());
-    const list = box.querySelector('#cm-models'); list.replaceChildren(...ids.map(id => { const option = node('option'); option.value = id; return option; }));
-    notice(`连接成功，取得 ${ids.length} 个模型。选择或填写总结模型后开始。`); return;
+    await fetchModels(btn); return;
+  }
+  if(action==='vector-models'){await fetchModels(btn,'vector');return;}
+  if(action==='detect-summary'){context().extensionSettings[SLOT] ||= {};context().extensionSettings[SLOT].autoSummary=true;box.querySelector('[data-setting="autoSummary"]').checked=true;await refreshDetection();return;}
+  if(action==='vector-test'||action==='vector-index'||action==='vector-rebuild') {
+    try { if(action!=='vector-test')idle();else if(job)throw Error('请等待当前记忆操作结束'); } catch(error){vectorStatus(error.message);return;}
+    const connection=vectorSettings();btn.disabled=true;job=true;jobCancelled=false;const key=activeKey,stamp=state?memoryStamp(state):'';
+    try {
+      API.validate(connection);vectorStatus(action==='vector-test'?'正在测试向量接口…':'正在建立/更新向量索引…');
+      if(action==='vector-test'){const [vector]=await API.embed(connection,['记忆检索连接测试']);if(JSON.stringify([vectorSettings().apiUrl,vectorSettings().model,vectorSettings().apiKey])!==JSON.stringify([connection.apiUrl,connection.model,connection.apiKey]))throw Error('向量连接配置已变化，请重新测试');vectorStatus(`向量接口正常，返回 ${vector.length} 维向量。可以建立索引。`);}
+      else {
+        const candidates=state.periods.concat(state.cores).filter(row=>row.state==='active');
+        const current=()=>!jobCancelled&&enabled&&identity()===key&&state&&memoryStamp(state)===stamp&&JSON.stringify([vectorSettings().apiUrl,vectorSettings().model,vectorSettings().apiKey])===JSON.stringify([connection.apiUrl,connection.model,connection.apiKey]);
+        const result=await vectors.index({charId:key,candidates,settings:connection,isCurrent:current,force:action==='vector-rebuild',progress:p=>vectorStatus(`索引进度 ${p.cached+p.created}/${p.total} 条…`)});
+        vectorStatus(`向量索引就绪：${result.total} 条，新增 ${result.created} 条，复用 ${result.cached} 条。`);
+      }
+    } catch(error){vectorStatus(E.failureReason(error,connection));}finally{btn.disabled=false;job=false;}return;
   }
   if (action === 'supplement') {
     available(); if (job) throw new Error('请等待当前记忆操作结束');
     if (generationBusy()) throw new Error('角色仍在回复，请等本楼完成后再总结');
-    API.validate(settings()); notice('从已检查进度下一楼开始补充总结；旧失败在失败记录中手动重试。'); await controller.run(true); completionNotice('补充总结'); return;
+    await refreshDetection();API.validate(settings()); notice('从已检查进度下一楼开始补充总结；旧失败在失败记录中手动重试。'); await controller.run(true); completionNotice('补充总结'); return;
   }
   if (action === 'recall') {
-    available(); const result = await E.recall(state, box.querySelector('[data-cm-query]').value, settings());
+    available(); const result = await recallMemory(box.querySelector('[data-cm-query]').value);
     lastRecall = result.text || '没有命中相关记忆。'; renderStatus(); notice(`召回使用 ${result.used || 0} 字符，来源条目 ${result.items?.length || 0}。`); return;
   }
   if (action === 'extract') {
-    available(); const floor = Math.max(1, Math.floor(settings().previewFloor || 1));
+    available(); await refreshDetection();const floor = Math.max(1, Math.floor(settings().previewFloor || 1));
     const source = { ...state, cursor: floor - 1, anchorAt: state.activities.filter(a => a.sourceOrder < floor && !a.timeUnknown).at(-1)?.occurredAt || 0 };
     const result = E.prepare(source, chat(), { ...settings(), batchFloors: 1 });
     const row = result.prepared.activities[0]; notice(row ? `第 ${floor} 楼（消息索引 ${E.floors(chat())[floor-1].index}），${row.source === 'preset_summary' ? '命中已有摘要' : '未命中摘要，回退正文'}：${row.summary}\n时间：${row.timeLabel}；${row.timeUnknown ? '具体剧情日期未知' : new Date(row.occurredAt).toISOString()}` : '该楼不存在。'); return;
@@ -288,7 +392,7 @@ async function handle(btn) {
     available(); const ctx = context();
     download(R.MemoryTransfer.serialize(state, { id: activeKey, name: ctx.name2, userName: ctx.name1,
       source: { application: 'sillytavern', characterId: ctx.characters[ctx.characterId].avatar, chatId: ctx.getCurrentChatId?.() || ctx.chatId } },
-      { name: 'sillytavern-memory', version: '0.1.0' }), 'conversation-memory.json'); return;
+      { name: 'sillytavern-memory', version: '0.2.0' }), 'conversation-memory.json'); return;
   }
   if (action === 'import') { idle(); const input = box.querySelector('[data-cm-file]'); input.value = ''; input.click(); return; }
   if (action === 'cancel-import') { pendingImport = null; box.querySelector('[data-cm-import]').replaceChildren(); return; }
@@ -431,7 +535,7 @@ async function loadChat() {
   controller = E.create({ getState: () => state, getChat: chat, getSettings: settings, isCurrent: () => enabled && activeKey === key && identity() === key,
     save: next => save(next, key), request: request => API.generate(settings(), request.prompt),
     progress: progress => { renderStatus(); progressNotice(progress); } });
-  renderStatus(); renderMemories(); renderFailures(); scheduleAuto();
+  renderStatus(); renderMemories(); renderFailures();await refreshDetection();scheduleAuto();
 }
 function scheduleAuto() {
   clearTimeout(autoTimer);
@@ -450,8 +554,8 @@ globalThis.conversationMemoryInterceptor = async function (requestChat, _context
     if (cfg.inject) {
       const latest = E.floors(chat()).slice(-Math.max(1, Number(cfg.historyFloors) || 20));
       const query = latest.filter(f => f.user).slice(-3).map(f => f.body).join('\n');
-      const result = await E.recall(state, query, cfg);
-      if (identity() !== key) return;
+      const result = await recallMemory(query);
+      if (identity() !== key || !enabled || !settings().inject) return;
       lastRecall = result.text;
       const position = [0,1,2].includes(Number(cfg.position)) ? Number(cfg.position) : 1;
       context().setExtensionPrompt(SLOT, lastRecall, position, Math.max(0, Number(cfg.depth) || 0), false, 0);
@@ -471,7 +575,8 @@ async function init() {
   shell(); await loadChat(); const ctx = context(); const types = ctx.eventTypes || ctx.event_types;
   ctx.eventSource.on(types.CHAT_CHANGED, () => loadChat().catch(error => notice(error.message)));
   if (types.GENERATION_STARTED) ctx.eventSource.on(types.GENERATION_STARTED, () => { generating = true; clearTimeout(autoTimer); });
-  if (types.GENERATION_ENDED) ctx.eventSource.on(types.GENERATION_ENDED, () => { generating = false; renderStatus(); scheduleAuto(); });
+  if (types.GENERATION_ENDED) ctx.eventSource.on(types.GENERATION_ENDED, async () => { generating = false;renderStatus();await refreshDetection();scheduleAuto(); });
+  for(const name of ['OPENAI_PRESET_CHANGED_AFTER','SETTINGS_UPDATED','PRESET_CHANGED'])if(types[name])ctx.eventSource.on(types[name],()=>refreshDetection().catch(error=>notice(error.message)));
   for (const name of ['MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED']) if (types[name]) ctx.eventSource.on(types[name], () => { renderStatus(); scheduleAuto(); });
 }
 export function onDisable() { enabled = false; generation++; jobCancelled = true; clearTimeout(autoTimer); controller?.pause(); clearInjection(); }

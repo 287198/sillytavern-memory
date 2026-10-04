@@ -237,7 +237,7 @@ async function testGeneration(btn) {
   }catch(error){status.textContent=E.failureReason(error,cfg);diagnostic=E.safeDiagnostic(error.diagnostic,cfg)||diagnostic;}
   finally{
     if(signature(settings())!==signature(cfg)){status.textContent='总结连接配置已变化，请重新测试';diagnostic=null;}
-    if(diagnostic)diagnosticView(host,{pluginVersion:'0.4.3',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
+    if(diagnostic)diagnosticView(host,{pluginVersion:'0.4.4',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
   }
 }
 async function fetchModels(btn,kind = 'summary') {
@@ -276,6 +276,8 @@ function shell() {
   const sourceLabel=node('label','总结来源','cm-field'),sourceSelect=node('select');sourceSelect.className='text_pole';sourceSelect.dataset.setting='summarySource';sourceSelect.setAttribute('aria-label','总结来源');
   for(const [value,label] of [['auto','摘要优先，缺失时用原文'],['raw','仅从聊天原文精炼（旧聊天/混用预设）']]){const option=node('option',label);option.value=value;sourceSelect.append(option);}
   sourceLabel.append(sourceSelect,node('small','按当前聊天保存。原文模式读取完整消息，让模型跨预设判别主线与附加内容，只写主线经历；跳过摘要和时间正则/JSON 字段。切换来源不会重写已有记忆；全部重做可先在导入导出清空当前聊天记忆，再点补充总结。'));summary.append(sourceLabel);
+  field(summary,'maxPromptChars','总结输入字符容量','number','默认 120000 字符，统计本批规则、来源原文和前置上下文；批次自动减楼，不截断原文。超过单楼容量时按提示提高，仍需你的模型支持相应上下文。与 2800 字符的回复记忆注入上限无关。');
+  const capacityInfo=node('p');capacityInfo.dataset.cmCapacityInfo='';capacityInfo.className='cm-muted';summary.append(capacityInfo);
   const identity=node('p');identity.dataset.cmDiaryIdentity='';summary.append(identity);
   const plot=details(summary,'正文判别与忽略记录');plot.append(node('p','模型按语义和剧情连续性判断，不依赖单一预设标签。摘要、大总结用于核对主线；明确非正史小剧场、场外写作要求和附加输出不当成真实经历。混合楼层保留主线部分，真实剧情中的写报告、做梦等行为仍可保留。整楼忽略记录仅保存在当前浏览器，不参与召回和记忆导出。'));const plotRecords=node('div');plotRecords.dataset.cmPlotDecisions='';plot.append(plotRecords);
   const connect = details(connections, '独立总结 API', true);
@@ -298,7 +300,7 @@ function shell() {
   const counting = details(summary, '楼层与注入设置',true);
   field(counting, 'triggerFloors', '自动总结触发楼数', 'number'); field(counting, 'batchFloors', '每批总结楼数', 'number');
   field(counting, 'historyFloors', '回复历史楼数', 'number', '最近历史楼数，当前输入另外保留一次；只影响本次请求，不删除聊天。');
-  field(counting, 'contextFloors', '总结前置上下文楼数', 'number'); field(counting, 'budget', '记忆注入字符预算', 'number', '与楼层数分开计算，上限 2800 字符，整条选取。');
+  field(counting, 'contextFloors', '总结前置上下文楼数', 'number'); field(counting, 'budget', '记忆注入字符预算', 'number', '只限制角色回复时带入多少已存记忆，上限 2800 字符，整条选取。不限制总结原文长度；总结输入容量在本页上方单独设置。');
   field(counting, 'depth', '记忆注入深度', 'number');
   const positionLabel = node('label','记忆挂载位置','cm-field'), position = node('select'); position.className = 'text_pole'; position.dataset.setting = 'position';
   for (const [value,label] of [[1,'聊天内（按深度）'],[0,'主提示后'],[2,'主提示前']]) { const option = node('option',label); option.value = value; position.append(option); }
@@ -319,7 +321,7 @@ function shell() {
   field(extracting, 'realTime', '使用现实发送时间作为发生时间', 'checkbox', '剧情聊天默认关闭，没有明确剧情日期就保留未知。');
   field(extracting, 'anchorFloor', '日期锚点楼层', 'number'); field(extracting, 'anchorDate', '该楼剧情日期', 'text', 'YYYY-MM-DD；只从指定楼层向后解析明确时间承接。');
   const timezone = field(extracting, 'timezoneOffset', '剧情时区 UTC 偏移小时', 'number'); timezone.min = '-12'; timezone.max = '14';
-  field(extracting, 'maxPromptChars', '总结输入字符容量', 'number'); button('测试摘要与时间提取', 'extract', extracting);
+  button('测试摘要与时间提取', 'extract', extracting);
   const previewFloor = field(extracting, 'previewFloor', '测试提取楼层', 'number'); previewFloor.value = settings().previewFloor || 1;
   const exchange = details(exchangePage, '导入导出与来源重算',true);
   button('导出记忆 JSON', 'export', exchange); button('导入记忆 JSON', 'import', exchange);
@@ -385,11 +387,13 @@ function updateSetting(event) {
     scheduleAuto();renderStatus();
   }
   if(key==='autoSummary'||key==='autoTime')refreshDetection().catch(error=>notice(error.message));
+  if(['maxPromptChars','maxTokens','budget'].includes(key))renderStatus();
   if(['vectorEnabled','vectorApiUrl','vectorApiKey','vectorModel'].includes(key))queueVectorIndex();
 }
 function renderStatus() {
   if (!box) return;
   const source=box.querySelector('[data-setting="summarySource"]');source.value=settings().summarySource;source.disabled=!state||job||Boolean(controller?.busy());
+  const capacityCfg=settings();box.querySelector('[data-cm-capacity-info]').textContent=`总结输入：${capacityCfg.maxPromptChars} 字符；总结输出：${Math.max(256,Math.min(32000,Number(capacityCfg.maxTokens)||4096))} token（在「API与向量」设置）；回复时注入已存记忆：${Math.min(2800,Number(capacityCfg.budget)||2200)} 字符。三项独立，2800 不限制总结。`;
   const floors=E.floors(chat()),total=floors.length; const invalid = state ? E.invalidFrom(state, chat()) : -1;
   const counts=E.chatCounts(chat());box.querySelector('[data-cm-chat-counts]').textContent=`酒馆当前已读取 ${counts.messages} 条记录，可总结 ${counts.floors} 楼（含 ${counts.hiddenDialogue} 楼从上下文隐藏的对话）；排除 ${counts.system} 条系统通知、${counts.tools} 条工具记录、${counts.unsupported} 条无文本记录。隐藏对话仍按原顺序总结；候选回复不重复计楼。`;
   const pending = (state?.failures || []).filter(row => row.status === 'pending').length;
@@ -420,7 +424,7 @@ function renderFailures() {
     for (const item of row.history || []) history.append(node('p', `第 ${item.attempt} 次 · ${new Date(item.at).toLocaleString()} · ${item.reason}`));
     article.append(history);
     if((row.history||[]).some(item=>item.diagnostic)){
-      const cfg=settings();diagnosticView(article,{pluginVersion:'0.4.3',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
+      const cfg=settings();diagnosticView(article,{pluginVersion:'0.4.4',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
     }else article.append(node('small','旧记录未保存响应结构；新版手动重试后可查看诊断。验证错误会直接显示具体校验原因。'));
     if (row.status === 'pending') { const retry = button('手动重试', 'retry-failure', article); retry.dataset.id = row.id; }
     host.append(article);
@@ -483,7 +487,7 @@ function setExportSelection(value) {if(!exportSnapshot)return;for(const check of
 function exportSelected() {
   available();if(!exportSnapshot||exportSnapshot.key!==activeKey)throw Error('请选择当前聊天的导出条目');
   const ctx=context(),data=E.selectExport(exportSnapshot.data,[...exportSnapshot.selected]);
-  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.4.3'}),'conversation-memory.json');
+  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.4.4'}),'conversation-memory.json');
   box.querySelector('[data-cm-export-status]').textContent=`已发起所选 ${exportSnapshot.selected.size} 条记忆的 JSON 下载。`;
 }
 async function clearCurrentMemory(btn) {

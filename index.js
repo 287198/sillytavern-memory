@@ -3,6 +3,7 @@ import './engine.js';
 import './api.js';
 import './summary-adapter.js';
 import './vector.js';
+import './console.js';
 
 const E = globalThis.ConversationMemoryEngine;
 const R = globalThis.ConversationMemoryRules;
@@ -15,6 +16,7 @@ let lastRecall = '', pendingImport = null, editId = '', page = 0, failurePage = 
 let sessionVectorKey = '', regexModule = null, detectionToken = 0, detectionCandidates = [], timeCandidates=[];
 let vectorTimer=null,vectorTask=null,vectorQueued=false,vectorPaused=false,vectorEpoch=0;
 let actionFeedback=null;
+let management=null;
 const context = () => SillyTavern.getContext();
 const database = new Promise((resolve, reject) => {
   const request = indexedDB.open('ConversationMemoryPlugin', 1);
@@ -221,22 +223,21 @@ function shell() {
   if (document.getElementById('conversation-memory')) return;
   const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
   if (!host) throw new Error('酒馆扩展设置面板未就绪');
-  box = node('section', null, 'cm-panel'); box.id = 'conversation-memory';
-  const main = node('details'); main.open = true; main.append(node('summary', '眠眠机记忆辅助插件'));
-  const body = node('div', null, 'cm-body'); main.append(body); box.append(main);
-  body.append(node('p', '按楼层整理经历，在回复前唤起相关记忆。char 与 user 各一条算一楼。', 'cm-muted'));
-  const stats = node('p'); stats.dataset.cmStats = ''; stats.setAttribute('role', 'status'); body.append(stats);
+  management=globalThis.ConversationMemoryConsole.create({host,name:'眠眠机记忆辅助插件',showLauncher:settings().showLauncher!==false,onLauncherChange:value=>{const cfg=context().extensionSettings[SLOT] ||= {};cfg.showLauncher=value;context().saveSettingsDebounced();}});
+  box=management.dialog;const {memories,summary,connections,exchange:exchangePage,failures:failurePage}=management.panels,body=management.toolbar;
+  memories.append(node('p', '按楼层整理经历，在回复前唤起相关记忆。char 与 user 各一条算一楼。', 'cm-muted'));
+  const stats = node('p'); stats.dataset.cmStats = ''; stats.setAttribute('role', 'status'); memories.append(stats);
   const actions = node('div', null, 'cm-actions'); body.append(actions);
   button('补充总结', 'supplement', actions); button('暂停', 'pause', actions); button('整理核心记忆', 'digest', actions);
   const status = node('p', '配置总结 API 后，点击补充总结处理尚未总结的楼层。'); status.dataset.cmNotice = ''; status.setAttribute('role', 'status'); status.setAttribute('aria-live','polite'); body.append(status);
-  const toggles = node('div', null, 'cm-fields'); body.append(toggles);
+  const toggles = node('div', null, 'cm-fields'); summary.append(toggles);
   field(toggles, 'auto', '自动总结', 'checkbox'); field(toggles, 'inject', '注入记忆', 'checkbox');
-  const connect = details(body, '独立总结 API', true);
+  const connect = details(connections, '独立总结 API', true);
   field(connect, 'apiUrl', 'API 地址', 'url', 'OpenAI 兼容地址，例如 https://服务地址/v1。需要服务允许浏览器跨域。');
   field(connect, 'apiKey', 'API Key', 'password'); field(connect, 'saveKey', '保存密钥到酒馆设置', 'checkbox', '未勾选时密钥仅在本次页面会话中使用。');
   connectionControls(connect,'summary','model','models');
   field(connect, 'model', '模型', 'text', '下拉选择会自动填入；服务不支持模型列表时可以手动填写。'); field(connect, 'maxTokens', '输出 token 上限', 'number'); field(connect, 'timeout', '请求超时秒数', 'number');
-  const vectorPanel=details(body,'向量模型与语义召回');
+  const vectorPanel=details(connections,'向量模型与语义召回');
   field(vectorPanel,'vectorEnabled','启用向量增强召回','checkbox','词法命中不足时，用已建立的向量索引补充语义召回。记忆摘要和查询会发送到你配置的向量接口。');
   field(vectorPanel,'vectorApiUrl','向量 API 地址','url','OpenAI 兼容 embeddings 接口，例如 https://服务地址/v1。');
   field(vectorPanel,'vectorApiKey','向量 API Key','password');field(vectorPanel,'vectorSaveKey','保存向量密钥到酒馆设置','checkbox');
@@ -245,7 +246,7 @@ function shell() {
   button('测试向量接口','vector-test',vectorPanel);button('建立/更新向量索引','vector-index',vectorPanel);
   button('重建全部向量','vector-rebuild',vectorPanel);
   const vectorInfo=node('p','配置并启用后自动补建现有记忆；总结、导入、编辑和核心整理后自动更新，只处理新增或改动的内容。失败保留本地召回，可点击更新重试。');vectorInfo.dataset.cmVectorStatus='';vectorInfo.setAttribute('role','status');vectorInfo.setAttribute('aria-live','polite');vectorPanel.append(vectorInfo);
-  const counting = details(body, '楼层与注入设置');
+  const counting = details(summary, '楼层与注入设置',true);
   field(counting, 'triggerFloors', '自动总结触发楼数', 'number'); field(counting, 'batchFloors', '每批总结楼数', 'number');
   field(counting, 'historyFloors', '回复历史楼数', 'number', '最近历史楼数，当前输入另外保留一次；只影响本次请求，不删除聊天。');
   field(counting, 'contextFloors', '总结前置上下文楼数', 'number'); field(counting, 'budget', '记忆注入字符预算', 'number', '与楼层数分开计算，上限 2800 字符，整条选取。');
@@ -253,7 +254,7 @@ function shell() {
   const positionLabel = node('label','记忆挂载位置','cm-field'), position = node('select'); position.className = 'text_pole'; position.dataset.setting = 'position';
   for (const [value,label] of [[1,'聊天内（按深度）'],[0,'主提示后'],[2,'主提示前']]) { const option = node('option',label); option.value = value; position.append(option); }
   position.value = settings().position; positionLabel.append(position); counting.append(positionLabel);
-  const extracting = details(body, '摘要与剧情时间提取');
+  const extracting = details(summary, '摘要与剧情时间提取');
   field(extracting,'autoSummary','自动识别当前摘要格式','checkbox','只读检查当前启用正则、预设和聊天证据；手动编辑提取规则会关闭自动识别。');button('识别当前预设与正则','detect-summary',extracting);
   const candidateLabel=node('label','识别到的摘要格式','cm-field'),candidate=node('select');candidate.className='text_pole';candidate.dataset.cmSummaryCandidate='';candidate.setAttribute('aria-label','识别到的摘要格式');candidateLabel.append(candidate);extracting.append(candidateLabel);
   candidate.addEventListener('change',()=>{const row=detectionCandidates[Number(candidate.value)];if(candidate.value===''||!row)return;const cfg=context().extensionSettings[SLOT] ||= {};cfg.summaryPattern=row.pattern;cfg.summaryPath=row.path;cfg.autoSummary=false;cfg.summaryAutoSelection='';box.querySelector('[data-setting="autoSummary"]').checked=false;for(const key of ['summaryPattern','summaryPath'])box.querySelector(`[data-setting="${key}"]`).value=cfg[key];context().saveSettingsDebounced();box.querySelector('[data-cm-detection]').textContent=`已填入 ${row.label}。预览：${row.preview.slice(0,200)||'历史中尚无命中'}；之后保留此选择，可重新启用自动识别。`;});
@@ -271,7 +272,7 @@ function shell() {
   const timezone = field(extracting, 'timezoneOffset', '剧情时区 UTC 偏移小时', 'number'); timezone.min = '-12'; timezone.max = '14';
   field(extracting, 'maxPromptChars', '总结输入字符容量', 'number'); button('测试摘要与时间提取', 'extract', extracting);
   const previewFloor = field(extracting, 'previewFloor', '测试提取楼层', 'number'); previewFloor.value = settings().previewFloor || 1;
-  const exchange = details(body, '导入导出与来源重算');
+  const exchange = details(exchangePage, '导入导出与来源重算',true);
   button('导出记忆 JSON', 'export', exchange); button('导入记忆 JSON', 'import', exchange);
   button('确认从失效楼重算', 'rewind', exchange); button('游标归零检查全史', 'reset', exchange);
   field(exchange, 'rangeStart', '重算起始楼层', 'number').value = settings().rangeStart || 1;
@@ -279,12 +280,12 @@ function shell() {
   button('重算指定楼层范围', 'range', exchange);
   const file = node('input'); file.type = 'file'; file.accept = '.json,application/json'; file.hidden = true; file.dataset.cmFile = ''; exchange.append(file);
   const preview = node('div'); preview.dataset.cmImport = ''; exchange.append(preview);
-  const recall = details(body, '测试召回与本次注入');
+  const recall = details(memories, '测试召回与本次注入');
   const queryLabel = node('label', '召回测试问题'); const query = node('input'); query.dataset.cmQuery = ''; query.className = 'text_pole'; queryLabel.append(query); recall.append(queryLabel);
   button('测试召回', 'recall', recall); const rec = node('pre'); rec.dataset.cmRecall = ''; recall.append(rec);
-  const records = node('div'); records.dataset.cmRecords = ''; body.append(records);
-  const failures = details(body, '失败记录与手动重试'); failures.dataset.cmFailures = '';
-  const credits = details(body, '开源项目致谢');
+  const records = node('div'); records.dataset.cmRecords = ''; memories.append(records);
+  const failures = details(failurePage, '失败记录与手动重试',true); failures.dataset.cmFailures = '';
+  const credits = details(memories, '开源项目致谢');
   credits.append(node('p', '记忆整理规则源自眠眠机，参考以下项目的公开架构与提示词设计原则；未引入它们的数据库、服务端或运行时依赖。', 'cm-muted'));
   for (const [name, license, url] of [
     ['Graphiti', 'Apache-2.0', 'https://github.com/getzep/graphiti'],
@@ -298,7 +299,6 @@ function shell() {
     row.append(link, document.createTextNode(' · ' + license)); credits.append(row);
   }
   const repo = node('a', '插件 GitHub 与完整致谢'); repo.href = 'https://github.com/287198/sillytavern-memory'; repo.target = '_blank'; repo.rel = 'noopener noreferrer'; credits.append(repo);
-  host.append(box);
   box.addEventListener('input', updateSetting); box.addEventListener('change', updateSetting);
   box.addEventListener('click', event => {
     const action = event.target.closest('button[data-action]'); if (action) {actionNotice(action);handle(action).catch(error => notice(E.failureReason(error,settings())));}
@@ -329,6 +329,7 @@ function renderStatus() {
   const total = E.floors(chat()).length; const invalid = state ? E.invalidFrom(state, chat()) : -1;
   const pending = (state?.failures || []).filter(row => row.status === 'pending').length;
   box.querySelector('[data-cm-stats]').textContent = state ? `${context().name2} · 已总结 ${state.cursor} / ${total} 楼 · 已检查至 ${E.through(state)} 楼 · 下一批从 ${E.through(state) + 1} 楼 · 事件 ${state.periods.length} 条${pending ? ` · 待重试 ${pending} 条` : ''}${invalid >= 0 ? ` · 第 ${invalid + 1} 楼起来源有修改` : ''}` : '请选择单角色聊天';
+  management?.status(state?`${context().name2} · ${state.cursor} / ${total} 楼 · ${state.periods.length} 条事件${pending?` · ${pending} 条待重试`:''}`:'请选择单角色聊天',pending);
   box.querySelector('[data-cm-recall]').textContent = lastRecall || '本次尚未注入记忆。';
 }
 function renderFailures() {
@@ -452,7 +453,7 @@ async function handle(btn) {
     available(); const ctx = context();
     download(R.MemoryTransfer.serialize(state, { id: activeKey, name: ctx.name2, userName: ctx.name1,
       source: { application: 'sillytavern', characterId: ctx.characters[ctx.characterId].avatar, chatId: ctx.getCurrentChatId?.() || ctx.chatId } },
-      { name: 'sillytavern-memory', version: '0.2.1' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
+      { name: 'sillytavern-memory', version: '0.3.0' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
   }
   if (action === 'import') { idle(); const input = box.querySelector('[data-cm-file]'); input.value = ''; input.click();notice('请选择记忆 JSON；读取后会显示导入预览。'); return; }
   if (action === 'cancel-import') { pendingImport = null; box.querySelector('[data-cm-import]').replaceChildren();notice('已取消导入。'); return; }
@@ -640,8 +641,8 @@ async function init() {
   for(const name of ['OPENAI_PRESET_CHANGED_AFTER','SETTINGS_UPDATED','PRESET_CHANGED'])if(types[name])ctx.eventSource.on(types[name],()=>refreshDetection().catch(error=>notice(error.message)));
   for (const name of ['MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED']) if (types[name]) ctx.eventSource.on(types[name], () => { renderStatus(); scheduleAuto(); });
 }
-export function onDisable() { enabled = false; generation++; jobCancelled = true;vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer); clearTimeout(autoTimer); controller?.pause(); clearInjection(); }
-export function onEnable() { enabled = true; return loadChat().catch(error => notice(error.message)); }
+export function onDisable() { enabled = false;management?.setEnabled(false); generation++; jobCancelled = true;vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer); clearTimeout(autoTimer); controller?.pause(); clearInjection(); }
+export function onEnable() { enabled = true;management?.setEnabled(true); return loadChat().catch(error => notice(error.message)); }
 export function onDelete() { onDisable(); }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => init().catch(error => console.error('[ConversationMemory]', error.message)), { once: true });
 else init().catch(error => console.error('[ConversationMemory]', error.message));

@@ -18,3 +18,44 @@
 .cm-record p { margin: .5rem 0; }
 .cm-record label { margin: .5rem 0; }
 .cm-panel [data-cm-notice] { min-height: 1.5rem; }
+.cm-entry { padding: .75rem 0; color: var(--SmartThemeBodyColor, inherit); }
+.cm-entry h3 { margin: 0 0 .5rem; font-size: 1rem; }
+.cm-entry p { margin: .5rem 0; overflow-wrap: anywhere; }
+.cm-entry-visibility { display: flex; align-items: center; gap: .5rem; margin-top: .75rem; font-size: .875rem; }
+.cm-entry-visibility input { width: 1.25rem; height: 1.25rem; }
+.cm-launcher { position: fixed; z-index: 2147483000; right: max(1rem, env(safe-area-inset-right)); bottom: max(1rem, env(safe-area-inset-bottom)); min-width: 3.5rem; border-radius: 1.5rem; color: var(--SmartThemeBodyColor, #eee); background: var(--SmartThemeBlurTintColor, #302c29); border: 1px solid var(--SmartThemeBorderColor, #777); box-shadow: 0 .25rem 1rem #0003; }
+.cm-console { box-sizing: border-box; margin: auto; padding: 0; width: min(64rem, calc(100vw - 2rem)); height: min(50rem, calc(100dvh - 2rem)); max-width: none; max-height: none; border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: .75rem; background: var(--SmartThemeBlurTintColor, #272421); color: var(--SmartThemeBodyColor, #eee); font: inherit; box-shadow: 0 .75rem 3rem #0005; }
+.cm-console[open] { display: flex; flex-direction: column; }
+.cm-console .cm-button { color: inherit; background: var(--SmartThemeBlurTintColor, #36302b); border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: .375rem; }
+.cm-console input:not([type="checkbox"]), .cm-console select, .cm-console textarea { color: inherit; background: var(--SmartThemeBlurTintColor, #36302b); border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: .25rem; }
+.cm-console input::placeholder { color: inherit; opacity: .65; }
+.cm-console .cm-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cm-console [data-cm-connection], .cm-console [data-cm-vector-status], .cm-console [data-cm-detection], .cm-console [data-cm-time-detection] { grid-column: 1 / -1; }
+.cm-console::backdrop { background: #0007; }
+.cm-console [hidden], .cm-launcher[hidden] { display: none !important; }
+.cm-console-header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .75rem 1rem; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); flex-shrink: 0; }
+.cm-console-header h2 { margin: 0; font-size: 1.125rem; line-height: 1.5; }
+.cm-console-header button { flex-shrink: 0; }
+.cm-console-toolbar { padding: .5rem 1rem; flex-shrink: 0; }
+.cm-console-toolbar p { margin: .25rem 0; font-size: .875rem; line-height: 1.5; }
+.cm-console-toolbar [data-cm-stats] { opacity: .8; }
+.cm-console-toolbar [data-cm-notice] { max-height: 4.5rem; overflow: auto; }
+.cm-console-tabs { display: flex; gap: .25rem; overflow-x: auto; padding: 0 1rem .5rem; flex-shrink: 0; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); }
+.cm-console-tabs button { flex: 1 0 auto; white-space: nowrap; background: transparent; border: 1px solid transparent; border-radius: .375rem; }
+.cm-console-tabs button[aria-selected="true"] { color: var(--SmartThemeQuoteColor, #e0b896); border-color: var(--SmartThemeBorderColor, #777); background: #8882; font-weight: 600; }
+.cm-console-content { overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1; overscroll-behavior: contain; padding: .5rem 1rem 1rem; scrollbar-gutter: stable; }
+.cm-console-page { min-width: 0; }
+.cm-console-footer { margin: 0; padding: .5rem 1rem; font-size: .75rem; opacity: .75; border-top: 1px solid var(--SmartThemeBorderColor, #777); flex-shrink: 0; }
+.cm-count { display: inline-block; margin-left: .25rem; padding: 0 .375rem; border-radius: .75rem; background: #8883; font-size: .75rem; }
+@media (max-width: 600px) {
+  .cm-console { width: calc(100vw - 1rem); height: calc(100dvh - 1rem); border-radius: .5rem; }
+  .cm-console-header, .cm-console-toolbar { padding: .5rem .75rem; }
+  .cm-console-header h2 { font-size: 1rem; }
+  .cm-console-toolbar [data-cm-stats] { max-height: 2.625rem; overflow: auto; }
+  .cm-console-tabs { padding: 0 .75rem .5rem; }
+  .cm-console-tabs { flex-wrap: wrap; }
+  .cm-console-tabs .cm-button { box-sizing: border-box; flex: 1 0 calc((100% - .5rem) / 3); min-width: 0; font-size: .875rem; padding: .5rem; }
+  .cm-console .cm-fields { grid-template-columns: minmax(0, 1fr); }
+  .cm-console-content { padding: .25rem .75rem .75rem; scrollbar-gutter: auto; }
+  .cm-console-footer { padding: .375rem .75rem; }
+}

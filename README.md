@@ -22,11 +22,11 @@ git -C data/default-user/extensions/sillytavern-memory pull --ff-only
 
 如果之前是直接复制 ZIP 文件夹安装，该文件夹没有 Git 历史：先导出记忆 JSON，将旧文件夹移到备份位置，再用上面的命令克隆到相同路径；不要把克隆命令直接运行在非空旧文件夹里。更新遇到本地修改冲突时先保留自己的修改，不使用强制覆盖命令。
 
-## 首次配置与本地安装
+## 首次配置
 
-1. 解压安装包，把整个 `sillytavern-memory` 文件夹放到酒馆的 `data/<用户句柄>/extensions/` 中，例如 `data/default-user/extensions/sillytavern-memory/`。该目录下应直接包含 `manifest.json`、`index.js`、`shared.js`，不要再套一层文件夹。
-2. 重启或刷新酒馆，在扩展设置中打开「眠眠机记忆辅助插件」。目前面向单角色聊天。
-3. 填写**独立总结 API** 的地址、密钥和模型。支持 OpenAI 兼容 Chat Completions 接口，例如 `https://你的服务/v1`。服务须允许酒馆页面跨域请求；插件不使用主聊天 API 的连接、密钥或模型。
+1. 完成上面的 Git 安装，打开要整理记忆的单角色聊天。
+2. 重启或刷新酒馆，点击屏幕右下角「记忆」，或在扩展设置的「眠眠机记忆辅助插件」里点击「打开记忆管理台」。目前面向单角色聊天。
+3. 在管理台「API与向量 → 独立总结 API」填写地址、密钥和模型。支持 OpenAI 兼容 Chat Completions 接口，例如 `https://你的服务/v1`。服务须允许酒馆页面跨域请求；插件不使用主聊天 API 的连接、密钥或模型。
 4. 密钥默认只保留在当前页面会话。明确勾选「保存密钥到酒馆设置」后才持久保存；记忆 JSON 始终不包含密钥。
 
 「测试连接并获取模型」会在按钮旁显示请求进度、成功或具体错误，最多等待 20 秒。获取成功后用「选择总结模型」下拉选择，自动填入模型字段；不支持 `/models` 的服务仍可手动填写。取得列表只验证模型列表接口，不代表生成接口已经通过测试。
@@ -34,6 +34,20 @@ git -C data/default-user/extensions/sillytavern-memory pull --ff-only
 目录和扩展入口遵循 [SillyTavern 官方扩展文档](https://docs.sillytavern.app/for-contributors/writing-extensions/)。也可在本地开发时放入 `public/scripts/extensions/third-party/`；不要同时安装两份。
 
 manifest 声明最低客户端版本 1.13.5；目前已按官方 release 接口检查并通过模拟酒馆环境的真实浏览器测试，尚未在用户实际酒馆安装环境验收。
+
+## 悬浮管理台
+
+0.3.0 起，扩展面板仅保留当前聊天状态、打开管理台按钮和「显示悬浮入口」开关。详细内容移到独立窗口：
+
+| 页签 | 内容 |
+| --- | --- |
+| 记忆 | 事件和核心记忆、查看编辑、召回测试、致谢 |
+| 总结设置 | 自动总结、注入、楼层阈值、摘要与剧情时间规则 |
+| API与向量 | 独立总结连接、模型列表、向量连接与索引 |
+| 导入导出 | JSON 交换、来源重算、游标检查 |
+| 失败记录 | 失败原因、尝试历史与手动重试 |
+
+顶部补充总结、暂停、核心整理和进度提示始终可见，当前页独立滚动。手机使用近全屏窗口和两行页签，桌面使用较宽窗口并继承酒馆主题。支持 Esc 或关闭按钮；关闭后回到聊天，后台总结与自动索引继续，重新打开保留当前页和输入。禁用插件会关闭窗口并隐藏悬浮入口，重新启用可再次打开。窗口使用原生 dialog 管理焦点，方向键/Home/End 可切换页签。
 
 ## 总结与记忆注入
 
@@ -62,7 +76,7 @@ manifest 声明最低客户端版本 1.13.5；目前已按官方 release 接口�
 
 ## 预设摘要与时间
 
-摘要提取先尝试 JSON 字段路径，再尝试正则第一个捕获组，未命中才使用整楼正文。示例：
+在管理台「总结设置 → 摘要与剧情时间提取」配置。摘要提取先尝试 JSON 字段路径，再尝试正则第一个捕获组，未命中才使用整楼正文。示例：
 
 新配置默认开启「自动识别当前摘要格式」和「自动识别剧情时间格式」：只读检查当前允许启用的全局/角色/预设正则、当前预设的输出标签，以及最近 40 条角色存储消息。单一格式有实际命中时自动填入提取字段，并显示来源和预览；多个格式时从对应下拉列表选择。预设只有格式约定、历史尚无命中时展示候选，不把它当成已存在摘要。普通 `<summary>` 折叠栏标题、思维链和状态栏不会作为可靠摘要；明确标为剧情摘要的 `<details>` 支持提取标题后的正文。
 
@@ -93,7 +107,7 @@ manifest 声明最低客户端版本 1.13.5；目前已按官方 release 接口�
 
 ## 与眠眠机双向交换
 
-酒馆：打开当前角色聊天 → 扩展设置 →「导入导出与来源重算」→ 导出记忆 JSON；导入时先查看新增、重复、冲突和核心候选，再确认追加。
+酒馆：打开当前角色聊天 → 记忆管理台 →「导入导出」→ 导出记忆 JSON；导入时先查看新增、重复、冲突和核心候选，再确认追加。
 
 眠眠机：进入对应角色的**角色记忆库 → 导入导出**，导出或选择同格式 JSON。导出包括近期活动、时期记忆、核心条目和旧“大块记忆”。历史大块记忆完整保存为一条标记时间未知的时期记忆，原文日期仍保留在正文中。
 
@@ -105,7 +119,7 @@ manifest 声明最低客户端版本 1.13.5；目前已按官方 release 接口�
 
 ## 向量模型与语义召回
 
-打开「向量模型与语义召回」，配置独立的 API 地址、密钥和 embedding 模型：
+打开管理台「API与向量 → 向量模型与语义召回」，配置独立的 API 地址、密钥和 embedding 模型：
 
 1. 点击「获取向量模型列表」，从下拉列表选择，或手动填写服务支持的 embedding 模型。列表可能包含普通聊天模型，不能凭列表名字保证向量能力。
 2. 点击「测试向量接口」，验证 `/embeddings` 能返回有效向量并显示维度。
@@ -133,6 +147,7 @@ node scripts/build-sillytavern-memory-plugin.js
 node scripts/build-sillytavern-memory-plugin.js --check
 node --test scripts/memory-transfer.test.js scripts/memory-sillytavern-engine.test.js scripts/memory-sillytavern-api.test.js scripts/memory-sillytavern-adapter.test.js scripts/memory-sillytavern-vector.test.js
 node scripts/memory-sillytavern-browser.test.js
+node scripts/memory-sillytavern-console.test.js
 ```
 
 `shared.js` 由眠眠机的 model、journal、digestion、recall、transfer 五个源模块生成，并隔离在自己的运行域。修改规则应编辑原模块后重新构建，避免两端提示词和校验漂移。插件运行时无需访问眠眠机网站。

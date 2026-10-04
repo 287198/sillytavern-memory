@@ -28,8 +28,9 @@
   function extract(body, pattern, fieldPath) {
     if (fieldPath) {
       try {
-        var obj = JSON.parse(body.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
-        var value = fieldPath.split(".").reduce(function (v, key) { return v && Object.prototype.hasOwnProperty.call(v, key) ? v[key] : null; }, obj);
+        var value;
+        if(root.ConversationMemorySummary)value=root.ConversationMemorySummary.extract(body,"",fieldPath);
+        else {var obj = JSON.parse(body.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));value = fieldPath.split(".").reduce(function (v, key) { return v && Object.prototype.hasOwnProperty.call(v, key) ? v[key] : null; }, obj);}
         if (typeof value === "string" && value.trim()) return value.trim();
       } catch (ignore) {}
     }

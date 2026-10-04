@@ -1,11 +1,11 @@
 {
-  "display_name": "眠眠记忆 · Conversation Memory",
+  "display_name": "眠眠机记忆辅助插件",
   "loading_order": 80,
   "js": "index.js",
   "css": "style.css",
   "author": "Mmianji",
   "homePage": "https://github.com/287198/sillytavern-memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "auto_update": false,
   "minimum_client_version": "1.13.5",
   "generate_interceptor": "conversationMemoryInterceptor",

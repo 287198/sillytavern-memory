@@ -156,7 +156,7 @@ function clearInjection() { context().setExtensionPrompt(SLOT, '', 1, 1, false, 
 function notice(text) { if (box) box.querySelector('[data-cm-notice]').textContent = text;if(actionFeedback?.isConnected)actionFeedback.textContent=text; }
 function actionNotice(btn) {
   actionFeedback?.remove();actionFeedback=null;
-  if(['models','vector-models','vector-test','vector-index','vector-rebuild','detect-summary'].includes(btn.dataset.action))return;
+  if(['models','generation-test','vector-models','vector-test','vector-index','vector-rebuild','detect-summary'].includes(btn.dataset.action))return;
   if(!btn.parentElement.querySelector('[data-action="supplement"]')){actionFeedback=node('p');actionFeedback.dataset.cmActionFeedback='';actionFeedback.setAttribute('role','status');actionFeedback.setAttribute('aria-live','polite');btn.insertAdjacentElement('afterend',actionFeedback);}
   notice(`正在处理「${btn.textContent}」…`);
 }
@@ -167,7 +167,7 @@ function progressNotice(p, verb = '总结') {
 }
 function completionNotice(label) {
   const pending = (state.failures || []).filter(row => row.status === 'pending').length;
-  notice(`${label}结束，已保存进度。${pending ? `有 ${pending} 条失败记录，请在管理面板手动重试。` : ''}`);
+  notice(`${label}结束。当前已存 ${state.periods.length} 条事件、${state.cores.length} 条核心。${pending ? `有 ${pending} 条失败记录，请在「失败记录」查看原因和响应诊断，再手动重试。` : ''}`);
 }
 function available() {
   if (!enabled) throw new Error('插件已禁用，请启用后操作记忆');
@@ -208,6 +208,35 @@ function connectionControls(parent, kind, modelKey, action) {
   const status = node('div'); status.dataset.cmConnection = kind; status.setAttribute('role','status'); status.setAttribute('aria-live','polite'); status.append(node('p','填写接口地址和密钥后获取模型，或手动填写服务提供的模型名称。')); parent.append(status);
 }
 function connectionStatus(kind,text) { box.querySelector(`[data-cm-connection="${kind}"] p`).textContent = text; }
+function diagnosticView(parent,report) {
+  const detail=node('details');detail.append(node('summary','查看响应诊断（手机可用）'));
+  const text=JSON.stringify(report,null,2),pre=node('pre',text);pre.dataset.cmDiagnostic='';detail.append(pre);
+  const copy=node('button','复制诊断','menu_button cm-button');copy.type='button';detail.append(copy);
+  const status=node('p');status.dataset.cmCopyStatus='';status.setAttribute('role','status');detail.append(status);
+  copy.addEventListener('click',async()=>{
+    try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);status.textContent='诊断已复制。';return;}}catch{}
+    let area=detail.querySelector('textarea');
+    if(!area){const label=node('label','诊断文本（可长按复制）');area=node('textarea');area.readOnly=true;area.rows=8;area.setAttribute('aria-label','诊断文本（可长按复制）');label.append(area);detail.append(label);}
+    area.value=text;area.focus();area.select();let copied=false;try{copied=document.execCommand?.('copy')===true;}catch{}
+    status.textContent=copied?'诊断已复制。':'诊断文本已展开，可长按复制。';
+  });parent.append(detail);
+}
+async function testGeneration(btn) {
+  const cfg=settings(),status=box.querySelector('[data-cm-generation-status]'),host=box.querySelector('[data-cm-generation-diagnostics]');
+  const signature=value=>JSON.stringify([value.apiUrl,value.apiKey,value.model,value.maxTokens,value.timeout,value.summaryThinking||'auto']);
+  let diagnostic=null;btn.disabled=true;host.replaceChildren();status.textContent='正在实际调用总结模型…本次仅测试生成，不读取聊天，不写入记忆。';
+  try{
+    const content=await API.generate({...cfg,onDiagnostic:value=>{diagnostic=E.safeDiagnostic(value,cfg);}},'总结生成连接测试：请严格输出 JSON {"ok":true}，不需要解释。');
+    if(signature(settings())!==signature(cfg))throw Error('总结连接配置已变化，请重新测试');
+    let result;try{result=JSON.parse(content);}catch{throw Error('模型返回了正文，但未按要求输出 JSON；请检查总结模型或转发服务兼容性');}
+    if(result?.ok!==true)throw Error('模型返回的 JSON 未通过生成测试，请检查模型或转发服务兼容性');
+    status.textContent='总结生成正常，已取得有效 JSON。可回到「失败记录」手动重试历史失败批次。';
+  }catch(error){status.textContent=E.failureReason(error,cfg);diagnostic=E.safeDiagnostic(error.diagnostic,cfg)||diagnostic;}
+  finally{
+    if(signature(settings())!==signature(cfg)){status.textContent='总结连接配置已变化，请重新测试';diagnostic=null;}
+    if(diagnostic)diagnosticView(host,{pluginVersion:'0.3.3',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
+  }
+}
 async function fetchModels(btn,kind = 'summary') {
   const cfg = settings(), key = kind === 'summary' ? 'model' : 'vectorModel';
   const snapshot = kind === 'summary' ? cfg : vectorSettings();
@@ -244,7 +273,13 @@ function shell() {
   field(connect, 'apiUrl', 'API 地址', 'url', 'OpenAI 兼容地址，例如 https://服务地址/v1。需要服务允许浏览器跨域。');
   field(connect, 'apiKey', 'API Key', 'password'); field(connect, 'saveKey', '保存密钥到酒馆设置', 'checkbox', '未勾选时密钥仅在本次页面会话中使用。');
   connectionControls(connect,'summary','model','models');
-  field(connect, 'model', '模型', 'text', '下拉选择会自动填入；服务不支持模型列表时可以手动填写。'); field(connect, 'maxTokens', '输出 token 上限', 'number'); field(connect, 'timeout', '请求超时秒数', 'number');
+  field(connect, 'model', '模型', 'text', '下拉选择会自动填入；服务不支持模型列表时可以手动填写。');
+  const thinkingLabel=node('label','总结思考模式','cm-field'),thinking=node('select');thinking.className='text_pole';thinking.dataset.setting='summaryThinking';thinking.setAttribute('aria-label','总结思考模式');
+  for(const [value,label] of [['auto','自动（DeepSeek Flash/V4 Pro 关闭思考）'],['disabled','关闭思考'],['enabled','开启思考'],['inherit','使用服务默认值']]){const option=node('option',label);option.value=value;thinking.append(option);}
+  thinking.value=settings().summaryThinking||'auto';thinkingLabel.append(thinking,node('small','自动模式仅对识别到的 DeepSeek Flash/V4 Pro 设置 thinking=disabled，其他模型沿用服务默认值。转发服务若不支持 thinking 参数，请选「使用服务默认值」。'));connect.append(thinkingLabel);
+  field(connect, 'maxTokens', '输出 token 上限', 'number','思考模型的预算可能包含思考 token；只有思考、没有最终正文时，请先关闭思考或增加上限。'); field(connect, 'timeout', '请求超时秒数', 'number');
+  button('测试总结生成','generation-test',connect);const generationStatus=node('p','模型列表连接成功后，还需要测试实际总结生成。');generationStatus.dataset.cmGenerationStatus='';generationStatus.setAttribute('role','status');generationStatus.setAttribute('aria-live','polite');connect.append(generationStatus);
+  const generationDiagnostics=node('div');generationDiagnostics.dataset.cmGenerationDiagnostics='';connect.append(generationDiagnostics);
   const vectorPanel=details(connections,'向量模型与语义召回');
   field(vectorPanel,'vectorEnabled','启用向量增强召回','checkbox','词法命中不足时，用已建立的向量索引补充语义召回。记忆摘要和查询会发送到你配置的向量接口。');
   field(vectorPanel,'vectorApiUrl','向量 API 地址','url','OpenAI 兼容 embeddings 接口，例如 https://服务地址/v1。');
@@ -365,6 +400,9 @@ function renderFailures() {
     const history = node('details'); history.append(node('summary', '查看失败原因历史'));
     for (const item of row.history || []) history.append(node('p', `第 ${item.attempt} 次 · ${new Date(item.at).toLocaleString()} · ${item.reason}`));
     article.append(history);
+    if((row.history||[]).some(item=>item.diagnostic)){
+      const cfg=settings();diagnosticView(article,{pluginVersion:'0.3.3',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
+    }else article.append(node('small','旧记录未保存响应结构；新版手动重试后可查看诊断。验证错误会直接显示具体校验原因。'));
     if (row.status === 'pending') { const retry = button('手动重试', 'retry-failure', article); retry.dataset.id = row.id; }
     host.append(article);
   }
@@ -425,6 +463,7 @@ async function handle(btn) {
   if (action === 'models') {
     await fetchModels(btn); return;
   }
+  if(action==='generation-test'){await testGeneration(btn);return;}
   if(action==='vector-models'){await fetchModels(btn,'vector');return;}
   if(action==='detect-summary'){
     btn.disabled=true;const label=btn.textContent;btn.textContent='正在识别…';for(const selector of ['[data-cm-detection]','[data-cm-time-detection]'])box.querySelector(selector).textContent='正在读取当前预设、已启用正则和聊天内容…';
@@ -469,7 +508,7 @@ async function handle(btn) {
     available(); const ctx = context();
     download(R.MemoryTransfer.serialize(state, { id: activeKey, name: ctx.name2, userName: ctx.name1,
       source: { application: 'sillytavern', characterId: ctx.characters[ctx.characterId].avatar, chatId: ctx.getCurrentChatId?.() || ctx.chatId } },
-      { name: 'sillytavern-memory', version: '0.3.2' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
+      { name: 'sillytavern-memory', version: '0.3.3' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
   }
   if (action === 'import') { idle(); const input = box.querySelector('[data-cm-file]'); input.value = ''; input.click();notice('请选择记忆 JSON；读取后会显示导入预览。'); return; }
   if (action === 'cancel-import') { pendingImport = null; box.querySelector('[data-cm-import]').replaceChildren();notice('已取消导入。'); return; }

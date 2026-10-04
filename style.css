@@ -30,7 +30,7 @@
 .cm-console input:not([type="checkbox"]), .cm-console select, .cm-console textarea { color: inherit; background: var(--SmartThemeBlurTintColor, #36302b); border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: .25rem; }
 .cm-console input::placeholder { color: inherit; opacity: .65; }
 .cm-console .cm-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.cm-console [data-cm-connection], .cm-console [data-cm-vector-status], .cm-console [data-cm-detection], .cm-console [data-cm-time-detection] { grid-column: 1 / -1; }
+.cm-console [data-cm-connection], .cm-console [data-cm-vector-status], .cm-console [data-cm-detection], .cm-console [data-cm-time-detection], .cm-console [data-cm-generation-status], .cm-console [data-cm-generation-diagnostics] { grid-column: 1 / -1; }
 .cm-console::backdrop { background: #0007; }
 .cm-console [hidden], .cm-launcher[hidden] { display: none !important; }
 .cm-console-header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .75rem 1rem; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); flex-shrink: 0; }

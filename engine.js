@@ -195,9 +195,19 @@
   }
   function failureReason(error, settings) {
     var message = String(error && error.message || error || "未知错误");
-    var key = settings && settings.apiKey;
-    if (key) message = message.split(key).join("[已隐藏]");
+    [settings && settings.apiKey,settings && settings.vectorApiKey].filter(Boolean).forEach(function(key){message=message.split(key).join("[已隐藏]");});
     return message.replace(/Bearer\s+[^\s,;]+/gi, "Bearer [已隐藏]").slice(0, 600);
+  }
+  function safeDiagnostic(value,settings) {
+    if(!value||typeof value!=="object")return null;
+    var result={};
+    ["version","apiOrigin","apiPath","model","maxTokens","thinking","httpStatus","contentType","requestId","responseChars","responseKeys","elapsedMs","serverCode","serverMessage","choicesCount","finishReason","contentKind","contentChars","reasoningChars","messageFields","promptTokens","completionTokens","reasoningTokens"].forEach(function(key){
+      var item=value[key];
+      if(typeof item==="string")result[key]=item?failureReason(item,settings):"";
+      else if(typeof item==="number"&&Number.isFinite(item))result[key]=item;
+      else if(Array.isArray(item))result[key]=item.slice(0,20).filter(function(part){return typeof part==="string";}).map(function(part){return failureReason(part,settings).slice(0,80);});
+    });
+    return Object.keys(result).length?result:null;
   }
   async function retryTask(options) {
     var history = [], wait = options.wait || function (ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); };
@@ -214,8 +224,9 @@
         return { ok: true, value: value, count: attempt, history: history };
       } catch (error) {
         if (!check()) return { cancelled: true, count: attempt, history: history };
-        history.push({ at: Date.now(), attempt: attempt, reason: failureReason(error, options.getSettings ? options.getSettings() : options.settings),
-          stage: error && error.memoryStage || "request", code: String(error && error.code || "") });
+        var cfg=options.getSettings ? options.getSettings() : options.settings;
+        history.push({ at: Date.now(), attempt: attempt, reason: failureReason(error, cfg),
+          stage: error && error.memoryStage || "request", code: failureReason(error && error.code || "",cfg).slice(0,80),diagnostic:safeDiagnostic(error&&error.diagnostic,cfg) });
         if (options.progress) options.progress({ attempt: attempt, retry: attempt < 3, reason: history[history.length - 1].reason });
         if (attempt < 3) await wait(attempt * 500);
       }
@@ -338,5 +349,5 @@
   }
   root.ConversationMemoryEngine = { defaults: defaults, floors: floors, empty: empty, invalidFrom: invalidFrom, extract: extract,
     date: date, prepare: prepare, process: process, create: create, recall: recall, digest: digest, storeFor: storeFor,
-    through: through, advanceCursor: advanceCursor, retryTask: retryTask, recordFailure: recordFailure, failureReason: failureReason };
+    through: through, advanceCursor: advanceCursor, retryTask: retryTask, recordFailure: recordFailure, failureReason: failureReason, safeDiagnostic:safeDiagnostic };
 })(globalThis);

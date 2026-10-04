@@ -17,6 +17,10 @@
 .cm-record { padding: .75rem 0; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); }
 .cm-record p { margin: .5rem 0; }
 .cm-record label { margin: .5rem 0; }
+.cm-export-row { display:flex; align-items:flex-start; gap:.5rem; margin:.75rem 0; min-width:0; }
+.cm-export-row input { flex-shrink:0; }
+.cm-export-row span { min-width:0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.cm-console [data-cm-export] { grid-column:1 / -1; }
 .cm-panel [data-cm-notice] { min-height: 1.5rem; }
 .cm-entry { padding: .75rem 0; color: var(--SmartThemeBodyColor, inherit); }
 .cm-entry h3 { margin: 0 0 .5rem; font-size: 1rem; }

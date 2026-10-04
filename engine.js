@@ -3,7 +3,7 @@
   var rules = root.ConversationMemoryRules;
   var model = rules.MemoryLibraryModel;
   var DAY = 86400000;
-  var defaults = { auto: false, inject: true, triggerFloors: 100, batchFloors: 50, historyFloors: 20, contextFloors: 4,
+  var defaults = { auto: false, autoBackfill:false, inject: true, triggerFloors: 100, batchFloors: 50, historyFloors: 20, contextFloors: 4,
     budget: 2200, depth: 1, position: 1, maxPromptChars: 24000, summaryPattern: "", summaryPath: "", timePattern: "", timePath: "",
     summarySource: "auto", dateMode: "story", anchorFloor: 0, anchorDate: "", timezoneOffset: 0, apiUrl: "", apiKey: "", model: "", maxTokens: 4096, timeout: 90 };
   function copy(x) { return JSON.parse(JSON.stringify(x)); }
@@ -18,6 +18,27 @@
     }).filter(Boolean).map(function (floor, index) { floor.floor = index + 1; return floor; });
   }
   function empty(charId) { return { charId: charId, cursor: 0, processedThrough: 0, failures: [], signatures: [], activities: [], periods: [], cores: [], version: 1 }; }
+  function cleared(state) { return Object.assign(empty(state.charId),{summarySource:state.summarySource==='raw'?'raw':'auto',suspendAuto:true}); }
+  function sourceActivityIds(state,records) {
+    var ids=new Set();
+    function direct(row){[row].concat(row.facts||[],row.items||[]).forEach(function(part){['activityRefs','evidenceIds','sourceActivityIds'].forEach(function(key){(part[key]||[]).forEach(function(id){ids.add(id);});});});}
+    records.forEach(function(row){direct(row);(row.items||[]).forEach(function(item){var block=(state.periods||[]).find(function(p){return p.id===item.originBlockId;});if(block)direct(block);});});return ids;
+  }
+  function exportEntries(state) {
+    var entries=[],needed=sourceActivityIds(state,(state.periods||[]).concat(state.cores||[]));
+    ['cores','periods','activities'].forEach(function(group){(state[group]||[]).forEach(function(row){if(group==='activities'&&needed.has(row.id))return;entries.push({key:JSON.stringify([group,row.id]),id:row.id,group:group,title:group==='cores'?'核心记忆（整组）':group==='periods'?'事件记忆':'未合并的活动',text:group==='cores'?model.corePromptText(row):row.eventSummary||row.summary||'',label:row.title||row.timeLabel||''});});});return entries;
+  }
+  function selectExport(state,selection) {
+    var selected=new Set(selection),entries=exportEntries(state),known=new Set(entries.map(function(row){return row.key;}));
+    if(!selected.size)throw new Error('请至少选择一条记忆');
+    selected.forEach(function(key){if(!known.has(key))throw new Error('导出选择已变化，请重新打开列表');});
+    var data={periods:[],cores:[],activities:[]};
+    ['periods','cores'].forEach(function(group){data[group]=(state[group]||[]).filter(function(row){return selected.has(JSON.stringify([group,row.id]));}).map(copy);});
+    var coreIds=new Set(data.cores.map(function(row){return row.id;}));
+    data.periods.forEach(function(row){if(row.digestedInto&&!coreIds.has(row.digestedInto)||!data.cores.length&&row.digestionState==='digested'){delete row.digestedInto;delete row.digestionState;}});
+    var needed=sourceActivityIds(state,data.periods.concat(data.cores));
+    data.activities=(state.activities||[]).filter(function(row){return needed.has(row.id)||selected.has(JSON.stringify(['activities',row.id]));}).map(copy);return data;
+  }
   function through(state) { return Math.max(Number(state.cursor) || 0, Number(state.processedThrough) || 0); }
   function invalidFrom(state, chat) {
     var list = floors(chat); var signatures = state.signatures || []; var covered = through(state);
@@ -349,5 +370,5 @@
   }
   root.ConversationMemoryEngine = { defaults: defaults, floors: floors, empty: empty, invalidFrom: invalidFrom, extract: extract,
     date: date, prepare: prepare, process: process, create: create, recall: recall, digest: digest, storeFor: storeFor,
-    through: through, advanceCursor: advanceCursor, retryTask: retryTask, recordFailure: recordFailure, failureReason: failureReason, safeDiagnostic:safeDiagnostic };
+    through: through, advanceCursor: advanceCursor, retryTask: retryTask, recordFailure: recordFailure, failureReason: failureReason, safeDiagnostic:safeDiagnostic,exportEntries:exportEntries,selectExport:selectExport,cleared:cleared };
 })(globalThis);

@@ -18,6 +18,7 @@ let vectorTimer=null,vectorTask=null,vectorQueued=false,vectorPaused=false,vecto
 let actionFeedback=null;
 let management=null;
 let hostIsGenerating=null;
+let loadedFloors=0,automaticController=null,exportSnapshot=null;
 const finishedProcessors=new WeakSet();
 const context = () => SillyTavern.getContext();
 const database = new Promise((resolve, reject) => {
@@ -155,6 +156,7 @@ function chat() {
 function clearInjection() { context().setExtensionPrompt(SLOT, '', 1, 1, false, 0); lastRecall = ''; }
 function notice(text) { if (box) box.querySelector('[data-cm-notice]').textContent = text;if(actionFeedback?.isConnected)actionFeedback.textContent=text; }
 function actionNotice(btn) {
+  if(['previous','next','failure-previous','failure-next','export','export-all','export-none','export-confirm','clear-memory'].includes(btn.dataset.action))return;
   actionFeedback?.remove();actionFeedback=null;
   if(['models','generation-test','vector-models','vector-test','vector-index','vector-rebuild','detect-summary'].includes(btn.dataset.action))return;
   if(!btn.parentElement.querySelector('[data-action="supplement"]')){actionFeedback=node('p');actionFeedback.dataset.cmActionFeedback='';actionFeedback.setAttribute('role','status');actionFeedback.setAttribute('aria-live','polite');btn.insertAdjacentElement('afterend',actionFeedback);}
@@ -234,7 +236,7 @@ async function testGeneration(btn) {
   }catch(error){status.textContent=E.failureReason(error,cfg);diagnostic=E.safeDiagnostic(error.diagnostic,cfg)||diagnostic;}
   finally{
     if(signature(settings())!==signature(cfg)){status.textContent='总结连接配置已变化，请重新测试';diagnostic=null;}
-    if(diagnostic)diagnosticView(host,{pluginVersion:'0.3.4',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
+    if(diagnostic)diagnosticView(host,{pluginVersion:'0.4.0',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
   }
 }
 async function fetchModels(btn,kind = 'summary') {
@@ -266,9 +268,11 @@ function shell() {
   const status = node('p', '配置总结 API 后，点击补充总结处理尚未总结的楼层。'); status.dataset.cmNotice = ''; status.setAttribute('role', 'status'); status.setAttribute('aria-live','polite'); body.append(status);
   const toggles = node('div', null, 'cm-fields'); summary.append(toggles);
   field(toggles, 'auto', '自动总结', 'checkbox'); field(toggles, 'inject', '注入记忆', 'checkbox');
+  field(toggles,'autoBackfill','自动补旧聊天','checkbox','默认关闭；需同时开启自动总结。关闭时，打开聊天时已有的未检查楼层需先手动补齐，之后新楼按阈值自动总结。失败批次仍需手动重试。');
+  const autoPolicy=node('p');autoPolicy.dataset.cmAutoPolicy='';autoPolicy.setAttribute('role','status');summary.append(autoPolicy);
   const sourceLabel=node('label','总结来源','cm-field'),sourceSelect=node('select');sourceSelect.className='text_pole';sourceSelect.dataset.setting='summarySource';sourceSelect.setAttribute('aria-label','总结来源');
   for(const [value,label] of [['auto','摘要优先，缺失时用原文'],['raw','仅从聊天原文精炼（旧聊天/混用预设）']]){const option=node('option',label);option.value=value;sourceSelect.append(option);}
-  sourceLabel.append(sourceSelect,node('small','按当前聊天保存。原文模式跳过摘要和时间正则/JSON 字段，读取完整正文；剧情日期按正文证据或手动锚点确定。'));summary.append(sourceLabel);
+  sourceLabel.append(sourceSelect,node('small','按当前聊天保存。原文模式读取完整正文，跳过摘要和时间正则/JSON 字段；日期按正文证据或锚点确定。切换来源不会重写已有记忆；全部重做可先在导入导出清空当前聊天记忆，再点补充总结。'));summary.append(sourceLabel);
   const connect = details(connections, '独立总结 API', true);
   field(connect, 'apiUrl', 'API 地址', 'url', 'OpenAI 兼容地址，例如 https://服务地址/v1。需要服务允许浏览器跨域。');
   field(connect, 'apiKey', 'API Key', 'password'); field(connect, 'saveKey', '保存密钥到酒馆设置', 'checkbox', '未勾选时密钥仅在本次页面会话中使用。');
@@ -314,6 +318,9 @@ function shell() {
   const previewFloor = field(extracting, 'previewFloor', '测试提取楼层', 'number'); previewFloor.value = settings().previewFloor || 1;
   const exchange = details(exchangePage, '导入导出与来源重算',true);
   button('导出记忆 JSON', 'export', exchange); button('导入记忆 JSON', 'import', exchange);
+  const exportView=node('div');exportView.dataset.cmExport='';exchange.append(exportView);
+  button('清空当前聊天记忆','clear-memory',exchange);
+  exchange.append(node('p','清空包含当前聊天的事件、核心、手动修改和失败记录，游标归零；保留聊天原文和其他聊天。清空后暂停自动总结，可选原文来源再点补充总结从第 1 楼重做。','cm-muted'));
   button('确认从失效楼重算', 'rewind', exchange); button('游标归零检查全史', 'reset', exchange);
   field(exchange, 'rangeStart', '重算起始楼层', 'number').value = settings().rangeStart || 1;
   field(exchange, 'rangeEnd', '重算结束楼层', 'number').value = settings().rangeEnd || 1;
@@ -367,7 +374,11 @@ function updateSetting(event) {
   if(['timePattern','timePath'].includes(key)){cfg.autoTime=false;cfg.timeAutoSelection='';box.querySelector('[data-setting="autoTime"]').checked=false;}
   ctx.saveSettingsDebounced();
   if (key === 'inject' && !value) clearInjection();
-  if (key === 'auto') scheduleAuto();
+  if (key === 'auto'||key==='autoBackfill') {
+    if(!value&&automaticController&&automaticController===controller&&(key==='auto'||historicalRemaining()>0)){controller.pause();notice('已关闭自动任务，等待当前请求结束；已保存记忆保留。');}
+    if(key==='auto'&&value&&state?.suspendAuto){const key=activeKey;save({...state,suspendAuto:false},key).then(()=>{if(identity()===key)scheduleAuto();}).catch(error=>notice(error.message));}
+    scheduleAuto();renderStatus();
+  }
   if(key==='autoSummary'||key==='autoTime')refreshDetection().catch(error=>notice(error.message));
   if(['vectorEnabled','vectorApiUrl','vectorApiKey','vectorModel'].includes(key))queueVectorIndex();
 }
@@ -376,6 +387,7 @@ function renderStatus() {
   const source=box.querySelector('[data-setting="summarySource"]');source.value=settings().summarySource;source.disabled=!state||job||Boolean(controller?.busy());
   const total = E.floors(chat()).length; const invalid = state ? E.invalidFrom(state, chat()) : -1;
   const pending = (state?.failures || []).filter(row => row.status === 'pending').length;
+  const cfg=settings(),old=historicalRemaining();box.querySelector('[data-cm-auto-policy]').textContent=state?.suspendAuto?'当前聊天自动总结已暂停。选择来源后点击补充总结，或重新开启自动总结。':!cfg.auto?'自动总结已关闭；仍可点击补充总结手动处理。':old&&!cfg.autoBackfill?`当前有 ${old} 楼旧聊天尚未检查，自动补旧聊天已关闭。请先手动补充总结，或明确开启自动补旧聊天。`:'自动总结已开启；新楼按触发阈值处理。'+(cfg.autoBackfill?'允许自动补齐尚未检查的旧楼；已失败批次仍需手动重试。':'旧楼已检查，不会自动重试旧失败批次。');
   box.querySelector('[data-cm-stats]').textContent = state ? `${context().name2} · 连续补齐 ${state.cursor} / ${total} 楼 · 已检查至 ${E.through(state)} 楼 · 已保存 ${state.periods.length} 条事件、${state.cores.length} 条核心记忆${E.through(state)<total?` · 下一批从 ${E.through(state)+1} 楼`:''}${pending ? ` · 待重试 ${pending} 批。失败楼层会阻挡连续进度，已保存的记忆仍可使用；请到「失败记录」手动重试。` : ''}${invalid >= 0 ? ` · 第 ${invalid + 1} 楼起来源有修改` : ''}` : '请选择单角色聊天';
   management?.status(state?`${context().name2} · 已存 ${state.periods.length} 条事件、${state.cores.length} 条核心 · 已检查 ${E.through(state)} / ${total} 楼 · 连续补齐 ${state.cursor} / ${total} 楼${pending?` · 待补 ${pending} 批`:''}`:'请选择单角色聊天',pending);
   box.querySelector('[data-cm-recall]').textContent = lastRecall || '本次尚未注入记忆。';
@@ -398,12 +410,12 @@ function renderFailures() {
     for (const item of row.history || []) history.append(node('p', `第 ${item.attempt} 次 · ${new Date(item.at).toLocaleString()} · ${item.reason}`));
     article.append(history);
     if((row.history||[]).some(item=>item.diagnostic)){
-      const cfg=settings();diagnosticView(article,{pluginVersion:'0.3.4',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
+      const cfg=settings();diagnosticView(article,{pluginVersion:'0.4.0',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
     }else article.append(node('small','旧记录未保存响应结构；新版手动重试后可查看诊断。验证错误会直接显示具体校验原因。'));
     if (row.status === 'pending') { const retry = button('手动重试', 'retry-failure', article); retry.dataset.id = row.id; }
     host.append(article);
   }
-  const nav = node('div', null, 'cm-actions'); button('失败上一页', 'failure-previous', nav); nav.append(node('span', `${failurePage + 1} / ${Math.ceil(all.length / 20)}`)); button('失败下一页', 'failure-next', nav); host.append(nav);
+  const nav = node('div', null, 'cm-actions'); button('失败上一页', 'failure-previous', nav).disabled=failurePage===0; nav.append(node('span', `${failurePage + 1} / ${Math.ceil(all.length / 20)}`)); button('失败下一页', 'failure-next', nav).disabled=failurePage>=Math.ceil(all.length/20)-1; host.append(nav);
 }
 function renderMemories() {
   if (!box) return;
@@ -436,11 +448,41 @@ function renderMemories() {
     }
     host.append(article);
   }
-  const nav = node('div', null, 'cm-actions'); button('上一页', 'previous', nav); nav.append(node('span', `${page + 1} / ${Math.ceil(all.length / 20)}`)); button('下一页', 'next', nav); host.append(nav);
+  const nav = node('div', null, 'cm-actions'); button('上一页', 'previous', nav).disabled=page===0; nav.append(node('span', `${page + 1} / ${Math.ceil(all.length / 20)}`)); button('下一页', 'next', nav).disabled=page>=Math.ceil(all.length/20)-1; host.append(nav);
 }
 function download(text, name) {
   const url = URL.createObjectURL(new Blob([text], { type: 'application/json;charset=utf-8' }));
   const anchor = node('a'); anchor.href = url; anchor.download = name; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function chooseExport() {
+  available();const data=structuredClone(state),entries=E.exportEntries(data),host=box.querySelector('[data-cm-export]');
+  exportSnapshot={key:activeKey,data,entries,selected:new Set(entries.map(row=>row.key))};host.replaceChildren();
+  host.append(node('h3','勾选要导出的记忆'),node('p','默认全选，可取消不需要的条目。仅导出此列表快照中的所选记忆记录，所需来源活动会附带；核心记忆按整组选取。','cm-muted'));
+  const controls=node('div',null,'cm-actions');button('全选记忆','export-all',controls);button('全不选','export-none',controls);button('导出已选记忆','export-confirm',controls);host.append(controls);
+  const info=node('p');info.dataset.cmExportStatus='';info.setAttribute('role','status');host.append(info);
+  const list=node('div',null,'cm-export-list');
+  for(const entry of entries){const label=node('label',null,'cm-export-row'),check=node('input');check.type='checkbox';check.checked=true;check.value=entry.key;check.dataset.cmExportChoice='';label.append(check,node('span',`${entry.title}${entry.label?' · '+entry.label:''}\n${entry.text}`));list.append(label);
+    check.addEventListener('change',()=>{if(exportSnapshot?.data!==data)return;if(check.checked)exportSnapshot.selected.add(entry.key);else exportSnapshot.selected.delete(entry.key);exportStatus();});}
+  host.append(list);exportStatus();host.scrollIntoView({block:'start'});
+}
+function exportStatus() {
+  if(!exportSnapshot)return;const host=box.querySelector('[data-cm-export]'),count=exportSnapshot.selected.size;
+  host.querySelector('[data-cm-export-status]').textContent=`已选择 ${count} / ${exportSnapshot.entries.length} 条。${exportSnapshot.entries.length?'':'当前没有可导出的记忆。'}`;host.querySelector('[data-action="export-confirm"]').disabled=!count;
+}
+function setExportSelection(value) {if(!exportSnapshot)return;for(const check of box.querySelectorAll('[data-cm-export-choice]')){check.checked=value;if(value)exportSnapshot.selected.add(check.value);else exportSnapshot.selected.delete(check.value);}exportStatus();}
+function exportSelected() {
+  available();if(!exportSnapshot||exportSnapshot.key!==activeKey)throw Error('请选择当前聊天的导出条目');
+  const ctx=context(),data=E.selectExport(exportSnapshot.data,[...exportSnapshot.selected]);
+  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.4.0'}),'conversation-memory.json');
+  box.querySelector('[data-cm-export-status]').textContent=`已发起所选 ${exportSnapshot.selected.size} 条记忆的 JSON 下载。`;
+}
+async function clearCurrentMemory(btn) {
+  idle();const key=activeKey,before=memoryStamp(state),label=btn.textContent;
+  if(!confirm(`仅清空当前聊天「${context().name2}」的 ${state.periods.length} 条事件、${state.cores.length} 条核心（含手动修改）和失败记录，并将进度归零？\n聊天原文、其他聊天与 API 设置保留。建议先导出备份。清空后自动总结暂停，不会立即调用 API。`)){notice('已取消清空，记忆未改变。');return;}
+  if(!state||identity()!==key||memoryStamp(state)!==before)throw Error('聊天或记忆已变化，请重新确认清空范围');
+  btn.disabled=true;btn.textContent='正在清空…';job=true;clearTimeout(autoTimer);controller?.pause();vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer);
+  try{await save(E.cleared(state),key);if(identity()!==key)return;clearInjection();pendingImport=null;editId='';page=failurePage=0;exportSnapshot=null;box.querySelector('[data-cm-export]').replaceChildren();box.querySelector('[data-cm-import]').replaceChildren();loadedFloors=E.floors(chat()).length;renderMemories();notice('当前聊天记忆已清空，进度归零，自动总结已暂停。需要原文重做时，在总结设置选择原文来源，再点击补充总结，从第 1 楼开始。');}
+  finally{btn.disabled=false;btn.textContent=label;job=false;renderStatus();if(vectorQueued)queueVectorIndex(false);}
 }
 async function previewImport(file) {
   idle(); if (!file) return;
@@ -487,7 +529,7 @@ async function handle(btn) {
     if(remaining<=0){const pending=(state.failures||[]).filter(row=>row.status==='pending').length;notice(`没有新的待总结楼层，已检查至第 ${E.through(state)} 楼。${pending?`有 ${pending} 条失败记录，请展开「失败记录与手动重试」补齐。`:'新增聊天后可继续补充总结。'}`);return;}
     API.validate(settings());const key=activeKey,label=btn.textContent;btn.disabled=true;btn.textContent='正在补充总结…';job=true;jobCancelled=false;vectorPaused=false;
     notice(`准备补充总结第 ${E.through(state)+1} 楼起，共 ${remaining} 楼；正在检查摘要规则…`);
-    try { await refreshDetection();if(jobCancelled||identity()!==key||!enabled)return;await controller.run(true);if(identity()===key) {if(jobCancelled)notice('补充总结已暂停，已保存的批次保留。');else completionNotice('补充总结');} }
+    try { await refreshDetection();if(jobCancelled||identity()!==key||!enabled)return;if(state.suspendAuto)await save({...state,suspendAuto:false},key);if(identity()!==key||!enabled)return;await controller.run(true);if(identity()===key) {if(jobCancelled)notice('补充总结已暂停，已保存的批次保留。');else completionNotice('补充总结');} }
     finally { btn.disabled=false;btn.textContent=label;job=false;renderStatus();if(vectorQueued)queueVectorIndex(false); }
     return;
   }
@@ -502,11 +544,11 @@ async function handle(btn) {
     const row = result.prepared.activities[0]; notice(row ? `第 ${floor} 楼（消息索引 ${E.floors(chat())[floor-1].index}），${settings().summarySource==='raw'?'直接使用聊天原文':row.source === 'preset_summary' ? '命中已有摘要' : '未命中摘要，回退正文'}：${row.summary}\n时间：${row.timeLabel}；${row.timeUnknown ? '具体剧情日期未知' : new Date(row.occurredAt).toISOString()}` : '该楼不存在。'); return;
   }
   if (action === 'export') {
-    available(); const ctx = context();
-    download(R.MemoryTransfer.serialize(state, { id: activeKey, name: ctx.name2, userName: ctx.name1,
-      source: { application: 'sillytavern', characterId: ctx.characters[ctx.characterId].avatar, chatId: ctx.getCurrentChatId?.() || ctx.chatId } },
-      { name: 'sillytavern-memory', version: '0.3.4' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
+    chooseExport();return;
   }
+  if(action==='export-all'||action==='export-none'){setExportSelection(action==='export-all');return;}
+  if(action==='export-confirm'){exportSelected();return;}
+  if(action==='clear-memory'){await clearCurrentMemory(btn);return;}
   if (action === 'import') { idle(); const input = box.querySelector('[data-cm-file]'); input.value = ''; input.click();notice('请选择记忆 JSON；读取后会显示导入预览。'); return; }
   if (action === 'cancel-import') { pendingImport = null; box.querySelector('[data-cm-import]').replaceChildren();notice('已取消导入。'); return; }
   if (action === 'confirm-import') {
@@ -641,7 +683,8 @@ function retireSources(next, from, to) {
 function localSource(row, memory) { return (row.sourceRefs || []).some(ref => ref.startsWith('sillytavern:' + memory.charId + ':floor:')); }
 async function loadChat() {
   if (!enabled) return;
-  const token = ++generation; generating=false;controller?.pause(); jobCancelled = true;vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer); clearInjection(); state = null; pendingImport = null; editId = ''; page = failurePage = 0;
+  const token = ++generation; generating=false;controller?.pause(); jobCancelled = true;vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer);clearTimeout(autoTimer); clearInjection(); state = null; pendingImport = null; editId = ''; page = failurePage = 0;loadedFloors=E.floors(chat()).length;
+  exportSnapshot=null;box.querySelector('[data-cm-export]').replaceChildren();
   activeKey = identity(); renderStatus(); renderMemories(); renderFailures(); if (!activeKey) return;
   const key = activeKey; const loaded = await read(key); if (token !== generation || identity() !== key) return;
   state = loaded; state.failures ||= []; state.processedThrough = E.through(state);
@@ -650,11 +693,13 @@ async function loadChat() {
     progress: progress => { renderStatus(); progressNotice(progress); } });
   renderStatus(); renderMemories(); renderFailures();await refreshDetection();scheduleAuto();queueVectorIndex();
 }
+function historicalRemaining(){return state?Math.max(0,Math.min(loadedFloors,E.floors(chat()).length)-E.through(state)):0;}
+function automaticAllowed(){const cfg=settings();return enabled&&state&&cfg.auto&&!state.suspendAuto&&(cfg.autoBackfill||!historicalRemaining());}
 function scheduleAuto() {
   clearTimeout(autoTimer);
-  if (!enabled || !settings().auto || !state) return;
+  if (!automaticAllowed()) return;
   autoTimer = setTimeout(async () => {
-    try { if (enabled&&state&&controller&&activeKey===identity()&&!job&&!generationBusy()) { API.validate(settings());const key=activeKey,running=controller,before=E.through(state);await running.run(false);if(activeKey===key&&identity()===key&&controller===running){renderStatus();if(E.through(state)>before)completionNotice('自动总结');} } }
+    try { if (automaticAllowed()&&controller&&activeKey===identity()&&!job&&!generationBusy()) { API.validate(settings());const key=activeKey,running=controller,before=E.through(state);automaticController=running;try{await running.run(false);}finally{if(automaticController===running)automaticController=null;}if(activeKey===key&&identity()===key&&controller===running){renderStatus();if(E.through(state)>before)completionNotice('自动总结');} } }
     catch (error) { notice(error.message); }
     finally{if(vectorQueued)queueVectorIndex(false);}
   }, 800);

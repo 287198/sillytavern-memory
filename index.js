@@ -4,11 +4,13 @@ import './api.js';
 import './summary-adapter.js';
 import './vector.js';
 import './console.js';
+import './time.js';
 
 const E = globalThis.ConversationMemoryEngine;
 const R = globalThis.ConversationMemoryRules;
 const API = globalThis.ConversationMemoryAPI;
 const Summary = globalThis.ConversationMemorySummary;
+const Time = globalThis.ConversationMemoryTime;
 const vectors = globalThis.ConversationMemoryVector.create({api:API});
 const SLOT = 'conversation_memory';
 let activeKey = '', state = null, controller = null, box = null, sessionKey = '', generation = 0, job = false;
@@ -18,7 +20,7 @@ let vectorTimer=null,vectorTask=null,vectorQueued=false,vectorPaused=false,vecto
 let actionFeedback=null;
 let management=null;
 let hostIsGenerating=null;
-let loadedFloors=0,automaticController=null,exportSnapshot=null;
+let loadedFloors=0,automaticController=null,exportSnapshot=null,storySave=null;
 const finishedProcessors=new WeakSet();
 const context = () => SillyTavern.getContext();
 const database = new Promise((resolve, reject) => {
@@ -124,7 +126,9 @@ function applyDetection(kind,candidates) {
   selector.disabled=!candidates.length;
   const ctx=context(),cfg=ctx.extensionSettings[SLOT] ||= {}, matched=candidates.filter(row=>row.matches>0),info=box.querySelector(isTime?'[data-cm-time-detection]':'[data-cm-detection]');
   if(settings()[auto]) {
-    const chosen=matched.length===1?matched[0]:null;
+    const latest=E.floors(chat()).filter(row=>!row.user).at(-1)?.body||'';
+    const currentMatches=matched.filter(row=>Summary.extract(latest,row.pattern,row.path));
+    const chosen=matched.length===1?matched[0]:isTime?null:currentMatches.find(row=>row.label.startsWith('已启用正则'))||currentMatches[0]||matched[0]||null;
     const before=JSON.stringify([cfg[pattern]||'',cfg[path]||'',cfg[selection]||'',cfg[auto]]);
     cfg[pattern]=chosen?.pattern||'';cfg[path]=chosen?.path||'';cfg[selection]=chosen?.label||'';cfg[auto]=true;
     for(const key of [pattern,path]){const input=box.querySelector(`[data-setting="${key}"]`);if(input.value!==cfg[key])input.value=cfg[key];}
@@ -158,7 +162,7 @@ function notice(text) { if (box) box.querySelector('[data-cm-notice]').textConte
 function actionNotice(btn) {
   if(['previous','next','failure-previous','failure-next','export','export-all','export-none','export-confirm','clear-memory'].includes(btn.dataset.action))return;
   actionFeedback?.remove();actionFeedback=null;
-  if(['models','generation-test','vector-models','vector-test','vector-index','vector-rebuild','detect-summary'].includes(btn.dataset.action))return;
+  if(['models','generation-test','vector-models','vector-test','vector-index','vector-rebuild','detect-summary','complete-time'].includes(btn.dataset.action))return;
   if(!btn.parentElement.querySelector('[data-action="supplement"]')){actionFeedback=node('p');actionFeedback.dataset.cmActionFeedback='';actionFeedback.setAttribute('role','status');actionFeedback.setAttribute('aria-live','polite');btn.insertAdjacentElement('afterend',actionFeedback);}
   notice(`正在处理「${btn.textContent}」…`);
 }
@@ -169,8 +173,7 @@ function progressNotice(p, verb = '总结') {
 }
 function completionNotice(label) {
   const pending = (state.failures || []).filter(row => row.status === 'pending').length;
-  const floors=E.floors(chat()),counts=E.coverage(state,floors.length,E.invalidFrom(state,chat()),floors).counts;
-  notice(`${label}结束。已总结 ${counts.summarized} 楼，待总结 ${counts.pending} 楼，总结失败 ${counts.failed} 楼。当前已存 ${state.periods.length} 条事件、${state.cores.length} 条核心。${pending ? `有 ${pending} 条失败记录，请在「失败记录」查看原因和响应诊断，再手动重试。` : ''}`);
+  notice(`${label}完成，已保存 ${state.periods.length} 条记忆。${pending ? `${pending} 批未完成，可到失败记录重试。` : ''}`);
 }
 function available() {
   if (!enabled) throw new Error('插件已禁用，请启用后操作记忆');
@@ -237,7 +240,7 @@ async function testGeneration(btn) {
   }catch(error){status.textContent=E.failureReason(error,cfg);diagnostic=E.safeDiagnostic(error.diagnostic,cfg)||diagnostic;}
   finally{
     if(signature(settings())!==signature(cfg)){status.textContent='总结连接配置已变化，请重新测试';diagnostic=null;}
-    if(diagnostic)diagnosticView(host,{pluginVersion:'0.4.4',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
+    if(diagnostic)diagnosticView(host,{pluginVersion:'0.5.0',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
   }
 }
 async function fetchModels(btn,kind = 'summary') {
@@ -262,30 +265,38 @@ function shell() {
   if (!host) throw new Error('酒馆扩展设置面板未就绪');
   management=globalThis.ConversationMemoryConsole.create({host,name:'眠眠机记忆辅助插件',showLauncher:settings().showLauncher!==false,onLauncherChange:value=>{const cfg=context().extensionSettings[SLOT] ||= {};cfg.showLauncher=value;context().saveSettingsDebounced();}});
   box=management.dialog;const {memories,summary,connections,exchange:exchangePage,failures:failurePage}=management.panels,body=management.toolbar;
-  memories.append(node('p', '按楼层整理经历，在回复前唤起相关记忆。char 与 user 各一条算一楼。', 'cm-muted'));
-  const stats = node('p'); stats.dataset.cmStats = ''; stats.setAttribute('role', 'status'); memories.append(stats);
-  const counts=node('p');counts.dataset.cmChatCounts='';counts.className='cm-muted';memories.append(counts);
-  const coveragePanel=details(memories,'哪些楼已总结、哪些还没总结');const coverage=node('div');coverage.dataset.cmFloorCoverage='';coveragePanel.append(coverage);
+  const memoryTools=node('div',null,'cm-actions');button('一键补全时间','complete-time',memoryTools);memories.append(memoryTools);
+  const timeStatus=node('p');timeStatus.dataset.cmTimeStatus='';timeStatus.setAttribute('role','status');memories.append(timeStatus);
+  const storyPanel=details(memories,'故事大致时间线（可选）'),storyLabel=node('label','故事大致时间线','cm-field'),storyInput=node('textarea');storyInput.rows=3;storyInput.maxLength=6000;storyInput.dataset.cmStoryTimeline='';storyInput.setAttribute('aria-label','故事大致时间线');storyInput.placeholder='例如：2024年秋天认识，冬天确定关系，2025年3月同居。';storyLabel.append(storyInput);storyPanel.append(storyLabel,node('small','预设没有日期时可填写。填到月份或季节即可，再点一键补全时间。'));
+  storyInput.addEventListener('change',()=>{
+    try{idle();const key=activeKey,next=structuredClone(state);next.storyTimeline=storyInput.value.trim();storySave=save(next,key);storySave.then(()=>{if(identity()===key)notice('故事时间线已保存，可以一键补全时间。');}).catch(error=>notice(error.message));}
+    catch(error){storyInput.value=state?.storyTimeline||'';notice(error.message);}
+  });
+  const extra=details(memories,'更多记忆操作'),coveragePanel=details(extra,'查看总结进度');
+  const stats = node('p'); stats.dataset.cmStats = ''; stats.setAttribute('role', 'status'); coveragePanel.append(stats);
+  const counts=node('p');counts.dataset.cmChatCounts='';counts.className='cm-muted';coveragePanel.append(counts);
+  const coverage=node('div');coverage.dataset.cmFloorCoverage='';coveragePanel.append(coverage);
   const actions = node('div', null, 'cm-actions'); body.append(actions);
-  button('补充总结', 'supplement', actions); button('暂停', 'pause', actions); button('整理核心记忆', 'digest', actions);
-  const status = node('p', '配置总结 API 后，点击补充总结处理尚未总结的楼层。'); status.dataset.cmNotice = ''; status.setAttribute('role', 'status'); status.setAttribute('aria-live','polite'); body.append(status);
+  button('补充旧聊天', 'supplement', actions); button('暂停', 'pause', actions);
+  button('整理核心记忆', 'digest', extra);
+  const status = node('p', '先配置 API，再点击补充旧聊天。'); status.dataset.cmNotice = ''; status.setAttribute('role', 'status'); status.setAttribute('aria-live','polite'); body.append(status);
+  summary.append(node('p','两种方式：自动跟随当前摘要；手动补充旧聊天，直接从原文整理。','cm-muted'));
   const toggles = node('div', null, 'cm-fields'); summary.append(toggles);
-  field(toggles, 'auto', '自动总结', 'checkbox'); field(toggles, 'inject', '注入记忆', 'checkbox');
-  field(toggles,'autoBackfill','自动补旧聊天','checkbox','默认关闭；需同时开启自动总结。关闭时，打开聊天时已有的未检查楼层需先手动补齐，之后新楼按阈值自动总结。失败批次仍需手动重试。');
+  field(toggles, 'auto', '自动总结', 'checkbox','跟随当前预设与正则读取摘要。'); field(toggles, 'inject', '注入记忆', 'checkbox');
+  field(summary, 'triggerFloors', '自动总结触发楼数', 'number');
   const autoPolicy=node('p');autoPolicy.dataset.cmAutoPolicy='';autoPolicy.setAttribute('role','status');summary.append(autoPolicy);
-  const sourceLabel=node('label','总结来源','cm-field'),sourceSelect=node('select');sourceSelect.className='text_pole';sourceSelect.dataset.setting='summarySource';sourceSelect.setAttribute('aria-label','总结来源');
-  for(const [value,label] of [['auto','摘要优先，缺失时用原文'],['raw','仅从聊天原文精炼（旧聊天/混用预设）']]){const option=node('option',label);option.value=value;sourceSelect.append(option);}
-  sourceLabel.append(sourceSelect,node('small','按当前聊天保存。原文模式读取完整消息，让模型跨预设判别主线与附加内容，只写主线经历；跳过摘要和时间正则/JSON 字段。切换来源不会重写已有记忆；全部重做可先在导入导出清空当前聊天记忆，再点补充总结。'));summary.append(sourceLabel);
-  field(summary,'maxPromptChars','总结输入字符容量','number','默认 120000 字符，统计本批规则、来源原文和前置上下文；批次自动减楼，不截断原文。超过单楼容量时按提示提高，仍需你的模型支持相应上下文。与 2800 字符的回复记忆注入上限无关。');
-  const capacityInfo=node('p');capacityInfo.dataset.cmCapacityInfo='';capacityInfo.className='cm-muted';summary.append(capacityInfo);
-  const identity=node('p');identity.dataset.cmDiaryIdentity='';summary.append(identity);
-  const plot=details(summary,'正文判别与忽略记录');plot.append(node('p','模型按语义和剧情连续性判断，不依赖单一预设标签。摘要、大总结用于核对主线；明确非正史小剧场、场外写作要求和附加输出不当成真实经历。混合楼层保留主线部分，真实剧情中的写报告、做梦等行为仍可保留。整楼忽略记录仅保存在当前浏览器，不参与召回和记忆导出。'));const plotRecords=node('div');plotRecords.dataset.cmPlotDecisions='';plot.append(plotRecords);
+  const advanced=details(summary,'高级设置');
+  field(advanced,'autoBackfill','自动补旧聊天','checkbox','默认关闭，旧聊天建议手动补充。');
+  field(advanced,'maxPromptChars','总结输入字符容量','number','默认 120000；自动减小批次，不截断原文。');
+  const capacityInfo=node('p');capacityInfo.dataset.cmCapacityInfo='';capacityInfo.className='cm-muted';advanced.append(capacityInfo);
+  const identity=node('p');identity.dataset.cmDiaryIdentity='';advanced.append(identity);
+  const plot=details(advanced,'正文判别与忽略记录');plot.append(node('p','模型按语义判断主线，过滤场外要求和非正史小剧场。'));const plotRecords=node('div');plotRecords.dataset.cmPlotDecisions='';plot.append(plotRecords);
   const connect = details(connections, '独立总结 API', true);
   field(connect, 'apiUrl', 'API 地址', 'url', 'OpenAI 兼容地址，例如 https://服务地址/v1。需要服务允许浏览器跨域。');
   field(connect, 'apiKey', 'API Key', 'password'); field(connect, 'saveKey', '保存密钥到酒馆设置', 'checkbox', '未勾选时密钥仅在本次页面会话中使用。');
   connectionControls(connect,'summary','model','models');
   field(connect, 'model', '模型', 'text', '下拉选择会自动填入；服务不支持模型列表时可以手动填写。');
-  field(connect, 'maxTokens', '输出 token 上限', 'number','仅保存最终总结。输出截断或没有最终正文时，可增加上限或减少每批楼数。'); field(connect, 'timeout', '请求超时秒数', 'number');
+  const connectionAdvanced=details(connect,'请求高级设置');field(connectionAdvanced, 'maxTokens', '输出 token 上限', 'number'); field(connectionAdvanced, 'timeout', '请求超时秒数', 'number');
   button('测试总结生成','generation-test',connect);const generationStatus=node('p','模型列表连接成功后，还需要测试实际总结生成。');generationStatus.dataset.cmGenerationStatus='';generationStatus.setAttribute('role','status');generationStatus.setAttribute('aria-live','polite');connect.append(generationStatus);
   const generationDiagnostics=node('div');generationDiagnostics.dataset.cmGenerationDiagnostics='';connect.append(generationDiagnostics);
   const vectorPanel=details(connections,'向量模型与语义召回');
@@ -297,15 +308,15 @@ function shell() {
   button('测试向量接口','vector-test',vectorPanel);button('建立/更新向量索引','vector-index',vectorPanel);
   button('重建全部向量','vector-rebuild',vectorPanel);
   const vectorInfo=node('p','配置并启用后自动补建现有记忆；总结、导入、编辑和核心整理后自动更新，只处理新增或改动的内容。失败保留本地召回，可点击更新重试。');vectorInfo.dataset.cmVectorStatus='';vectorInfo.setAttribute('role','status');vectorInfo.setAttribute('aria-live','polite');vectorPanel.append(vectorInfo);
-  const counting = details(summary, '楼层与注入设置',true);
-  field(counting, 'triggerFloors', '自动总结触发楼数', 'number'); field(counting, 'batchFloors', '每批总结楼数', 'number');
+  const counting = details(advanced, '楼层与注入设置');
+  field(counting, 'batchFloors', '每批总结楼数', 'number');
   field(counting, 'historyFloors', '回复历史楼数', 'number', '最近历史楼数，当前输入另外保留一次；只影响本次请求，不删除聊天。');
   field(counting, 'contextFloors', '总结前置上下文楼数', 'number'); field(counting, 'budget', '记忆注入字符预算', 'number', '只限制角色回复时带入多少已存记忆，上限 2800 字符，整条选取。不限制总结原文长度；总结输入容量在本页上方单独设置。');
   field(counting, 'depth', '记忆注入深度', 'number');
   const positionLabel = node('label','记忆挂载位置','cm-field'), position = node('select'); position.className = 'text_pole'; position.dataset.setting = 'position';
   for (const [value,label] of [[1,'聊天内（按深度）'],[0,'主提示后'],[2,'主提示前']]) { const option = node('option',label); option.value = value; position.append(option); }
   position.value = settings().position; positionLabel.append(position); counting.append(positionLabel);
-  const extracting = details(summary, '摘要与剧情时间提取');
+  const extracting = details(advanced, '摘要与剧情时间提取');
   field(extracting,'autoSummary','自动识别当前摘要格式','checkbox','只读检查当前启用正则、预设和聊天证据；手动编辑提取规则会关闭自动识别。');button('识别当前预设与正则','detect-summary',extracting);
   const candidateLabel=node('label','识别到的摘要格式','cm-field'),candidate=node('select');candidate.className='text_pole';candidate.dataset.cmSummaryCandidate='';candidate.setAttribute('aria-label','识别到的摘要格式');candidateLabel.append(candidate);extracting.append(candidateLabel);
   candidate.addEventListener('change',()=>{const row=detectionCandidates[Number(candidate.value)];if(candidate.value===''||!row)return;const cfg=context().extensionSettings[SLOT] ||= {};cfg.summaryPattern=row.pattern;cfg.summaryPath=row.path;cfg.autoSummary=false;cfg.summaryAutoSelection='';box.querySelector('[data-setting="autoSummary"]').checked=false;for(const key of ['summaryPattern','summaryPath'])box.querySelector(`[data-setting="${key}"]`).value=cfg[key];context().saveSettingsDebounced();box.querySelector('[data-cm-detection]').textContent=`已填入 ${row.label}。预览：${row.preview.slice(0,200)||'历史中尚无命中'}；之后保留此选择，可重新启用自动识别。`;});
@@ -327,19 +338,19 @@ function shell() {
   button('导出记忆 JSON', 'export', exchange); button('导入记忆 JSON', 'import', exchange);
   const exportView=node('div');exportView.dataset.cmExport='';exchange.append(exportView);
   button('清空当前聊天记忆','clear-memory',exchange);
-  exchange.append(node('p','清空包含当前聊天的事件、核心、手动修改和失败记录，游标归零；保留聊天原文和其他聊天。清空后暂停自动总结，可选原文来源再点补充总结从第 1 楼重做。','cm-muted'));
-  button('确认从失效楼重算', 'rewind', exchange); button('游标归零检查全史', 'reset', exchange);
-  field(exchange, 'rangeStart', '重算起始楼层', 'number').value = settings().rangeStart || 1;
-  field(exchange, 'rangeEnd', '重算结束楼层', 'number').value = settings().rangeEnd || 1;
-  button('重算指定楼层范围', 'range', exchange);
+  exchange.append(node('p','只清空当前聊天的记忆；聊天原文保留。','cm-muted'));
+  const recalculate=details(exchange,'高级重算');button('确认从失效楼重算', 'rewind', recalculate); button('游标归零检查全史', 'reset', recalculate);
+  field(recalculate, 'rangeStart', '重算起始楼层', 'number').value = settings().rangeStart || 1;
+  field(recalculate, 'rangeEnd', '重算结束楼层', 'number').value = settings().rangeEnd || 1;
+  button('重算指定楼层范围', 'range', recalculate);
   const file = node('input'); file.type = 'file'; file.accept = '.json,application/json'; file.hidden = true; file.dataset.cmFile = ''; exchange.append(file);
   const preview = node('div'); preview.dataset.cmImport = ''; exchange.append(preview);
-  const recall = details(memories, '测试召回与本次注入');
+  const recall = details(extra, '测试召回与本次注入');
   const queryLabel = node('label', '召回测试问题'); const query = node('input'); query.dataset.cmQuery = ''; query.className = 'text_pole'; queryLabel.append(query); recall.append(queryLabel);
   button('测试召回', 'recall', recall); const rec = node('pre'); rec.dataset.cmRecall = ''; recall.append(rec);
   const records = node('div'); records.dataset.cmRecords = ''; memories.append(records);
   const failures = details(failurePage, '失败记录与手动重试',true); failures.dataset.cmFailures = '';
-  const credits = details(memories, '开源项目致谢');
+  const credits = details(extra, '开源项目致谢');
   credits.append(node('p', '记忆整理规则源自眠眠机，参考以下项目的公开架构与提示词设计原则；未引入它们的数据库、服务端或运行时依赖。', 'cm-muted'));
   for (const [name, license, url] of [
     ['Graphiti', 'Apache-2.0', 'https://github.com/getzep/graphiti'],
@@ -353,6 +364,7 @@ function shell() {
     row.append(link, document.createTextNode(' · ' + license)); credits.append(row);
   }
   const repo = node('a', '插件 GitHub 与完整致谢'); repo.href = 'https://github.com/287198/sillytavern-memory'; repo.target = '_blank'; repo.rel = 'noopener noreferrer'; credits.append(repo);
+  memories.append(extra.parentElement);
   box.addEventListener('input', updateSetting); box.addEventListener('change', updateSetting);
   box.addEventListener('click', event => {
     const action = event.target.closest('button[data-action]'); if (action) {actionNotice(action);handle(action).catch(error => notice(E.failureReason(error,settings())));}
@@ -361,13 +373,6 @@ function shell() {
 }
 function updateSetting(event) {
   const key = event.target.dataset.setting; if (!key) return;
-  if(key==='summarySource'){
-    if(event.type!=='change')return;
-    const input=event.target;
-    try{idle();if(!['auto','raw'].includes(input.value))throw new Error('请选择有效的总结来源');const next=structuredClone(state),key=activeKey;next.summarySource=input.value;input.disabled=true;clearTimeout(autoTimer);
-      save(next,key).then(()=>{if(activeKey===key&&identity()===key){notice(next.summarySource==='raw'?'当前聊天已切换为原文精炼。失败记录可手动重试；已有成功记忆可在「导入导出」指定范围重算。':'当前聊天已切换为摘要优先，未命中摘要的楼层仍使用原文。');scheduleAuto();}}).catch(error=>{if(activeKey===key){renderStatus();notice(error.message);}});
-    }catch(error){input.value=settings().summarySource;notice(error.message);}return;
-  }
   const input = event.target; const ctx = context(); const cfg = ctx.extensionSettings[SLOT] ||= {};
   const value = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value.trim();
   if (input.type === 'number' && (!Number.isFinite(value) || value < Number(input.min || 0))) return;
@@ -392,7 +397,6 @@ function updateSetting(event) {
 }
 function renderStatus() {
   if (!box) return;
-  const source=box.querySelector('[data-setting="summarySource"]');source.value=settings().summarySource;source.disabled=!state||job||Boolean(controller?.busy());
   const capacityCfg=settings();box.querySelector('[data-cm-capacity-info]').textContent=`总结输入：${capacityCfg.maxPromptChars} 字符；总结输出：${Math.max(256,Math.min(32000,Number(capacityCfg.maxTokens)||4096))} token（在「API与向量」设置）；回复时注入已存记忆：${Math.min(2800,Number(capacityCfg.budget)||2200)} 字符。三项独立，2800 不限制总结。`;
   const floors=E.floors(chat()),total=floors.length; const invalid = state ? E.invalidFrom(state, chat()) : -1;
   const counts=E.chatCounts(chat());box.querySelector('[data-cm-chat-counts]').textContent=`酒馆当前已读取 ${counts.messages} 条记录，可总结 ${counts.floors} 楼（含 ${counts.hiddenDialogue} 楼从上下文隐藏的对话）；排除 ${counts.system} 条系统通知、${counts.tools} 条工具记录、${counts.unsupported} 条无文本记录。隐藏对话仍按原顺序总结；候选回复不重复计楼。`;
@@ -401,9 +405,11 @@ function renderStatus() {
   const report=box.querySelector('[data-cm-floor-coverage]');report.replaceChildren();for(const [key,label] of [['summarized','已总结'],['pending','待总结'],['failed','总结失败，需手动重试']])report.append(node('p',`${label}：${coverage[key].length?coverage[key].map(([from,to])=>from===to?`第 ${from} 楼`:`第 ${from}–${to} 楼`).join('、'):'无'}`));
   box.querySelector('[data-cm-diary-identity]').textContent=`写日记的人：${settings().characterName||'当前角色'}（char），“我”始终是这个角色；对方：${settings().userName||'对方'}（user）。原文叙述人称不会改变日记身份。`;
   const ignored=(state?.activities||[]).filter(row=>row.state==='archived_non_plot'),plotRecords=box.querySelector('[data-cm-plot-decisions]'),plotStamp=JSON.stringify(ignored.map(row=>[row.id,row.sourceOrder,row.sourceDecision]));if(plotRecords.dataset.stamp!==plotStamp){plotRecords.dataset.stamp=plotStamp;plotRecords.replaceChildren(node('p',ignored.length?`已检查并忽略 ${ignored.length} 楼（不生成事件）：`:'暂无整楼忽略记录。混合楼层的附加内容由模型在提炼时过滤。'));for(const row of ignored)plotRecords.append(node('p',`第 ${row.sourceOrder} 楼：${row.sourceDecision?.reason||'没有可利用的主线事实'}`));}
-  const cfg=settings(),old=historicalRemaining();box.querySelector('[data-cm-auto-policy]').textContent=state?.suspendAuto?'当前聊天自动总结已暂停。选择来源后点击补充总结，或重新开启自动总结。':!cfg.auto?'自动总结已关闭；仍可点击补充总结手动处理。':old&&!cfg.autoBackfill?`当前有 ${old} 楼旧聊天尚未检查，自动补旧聊天已关闭。请先手动补充总结，或明确开启自动补旧聊天。`:'自动总结已开启；新楼按触发阈值处理。'+(cfg.autoBackfill?'允许自动补齐尚未检查的旧楼；已失败批次仍需手动重试。':'旧楼已检查，不会自动重试旧失败批次。');
+  const cfg=settings(),old=historicalRemaining();box.querySelector('[data-cm-auto-policy]').textContent=state?.suspendAuto?'已暂停自动总结。':!cfg.auto?'自动总结已关闭。':old&&!cfg.autoBackfill?'旧聊天请先点「补充旧聊天」。':'将自动提炼新回复的摘要。';
   box.querySelector('[data-cm-stats]').textContent = state ? `${context().name2} · ${floorStats} · 已保存 ${state.periods.length} 条事件、${state.cores.length} 条核心记忆${pending ? ` · 待重试 ${pending} 批，已保存的记忆仍可使用；请到「失败记录」手动重试。` : ''}${invalid >= 0 ? ` · 第 ${invalid + 1} 楼起来源有修改，列入待总结；请先确认重算` : ''}` : '请选择单角色聊天';
-  management?.status(state?`${context().name2} · ${floorStats} · 已存 ${state.periods.length} 条事件、${state.cores.length} 条核心${pending?` · 待重试 ${pending} 批`:''}`:'请选择单角色聊天',pending);
+  management?.status(state?`${context().name2} · ${state.periods.filter(row=>row.state==='active').length} 条记忆 · 已总结 ${coverage.counts.summarized} / ${total} 楼${pending?` · ${pending} 批需重试`:''}`:'请选择单角色聊天',pending);
+  box.querySelector('[data-cm-time-status]').textContent=state?`${Time.ordered(state).filter(e=>Time.unknown(e.row)).length} 条记忆待补时间` : '';
+  const timelineInput=box.querySelector('[data-cm-story-timeline]');timelineInput.disabled=!state||job||Boolean(controller?.busy());if(document.activeElement!==timelineInput)timelineInput.value=state?.storyTimeline||'';
   box.querySelector('[data-cm-recall]').textContent = lastRecall || '本次尚未注入记忆。';
 }
 function renderFailures() {
@@ -415,8 +421,8 @@ function renderFailures() {
   failurePage = Math.min(failurePage, Math.ceil(all.length / 20) - 1);
   for (const row of all.slice(failurePage * 20, failurePage * 20 + 20)) {
     const article = node('article', null, 'cm-record'); article.dataset.failureId = row.id;
-    const operation = { summary: '补充总结', range: '范围重算', digest: '核心整理' }[row.operation] || row.operation;
-    article.append(node('strong', `${operation} · ${row.operation === 'digest' ? `${row.blockIds?.length || 0} 条事件` : `第 ${row.start}–${row.end} 楼`} · ${{pending:'待重试',resolved:'已解决',invalidated:'来源失效'}[row.status] || row.status}`));
+    const operation = { summary: '记忆总结', range: '范围重算', digest: '核心整理',time:'补全时间' }[row.operation] || row.operation;
+    article.append(node('strong', `${operation} · ${['digest','time'].includes(row.operation) ? `${row.blockIds?.length || 0} 条事件` : `第 ${row.start}–${row.end} 楼`} · ${{pending:'待重试',resolved:'已解决',invalidated:'来源失效'}[row.status] || row.status}`));
     article.append(node('p', `累计尝试 ${row.attempts} 次；最近一轮 ${row.lastAttempts} 次。${new Date(row.updatedAt).toLocaleString()}`));
     article.append(node('p', row.reason || '无错误详情'));
     if (row.invalidationReason) article.append(node('p', row.invalidationReason));
@@ -424,7 +430,7 @@ function renderFailures() {
     for (const item of row.history || []) history.append(node('p', `第 ${item.attempt} 次 · ${new Date(item.at).toLocaleString()} · ${item.reason}`));
     article.append(history);
     if((row.history||[]).some(item=>item.diagnostic)){
-      const cfg=settings();diagnosticView(article,{pluginVersion:'0.4.4',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
+      const cfg=settings();diagnosticView(article,{pluginVersion:'0.5.0',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
     }else article.append(node('small','旧记录未保存响应结构；新版手动重试后可查看诊断。验证错误会直接显示具体校验原因。'));
     if (row.status === 'pending') { const retry = button('手动重试', 'retry-failure', article); retry.dataset.id = row.id; }
     host.append(article);
@@ -436,12 +442,13 @@ function renderMemories() {
   const host = box.querySelector('[data-cm-records]'); host.replaceChildren(); if (!state) return;
   const all = state.cores.concat(state.periods.slice().reverse());
   host.append(node('h3', '已保存记忆'));
-  if (!all.length) { host.append(node('p', '还没有记忆。配置 API 后点击补充总结，或导入记忆 JSON。', 'cm-muted')); return; }
+  if (!all.length) { host.append(node('p', '还没有记忆。配置 API 后点击补充旧聊天，或导入记忆 JSON。', 'cm-muted')); return; }
   page = Math.min(page, Math.max(0, Math.ceil(all.length / 20) - 1));
   for (const record of all.slice(page * 20, page * 20 + 20)) {
     const article = node('article', null, 'cm-record');
     article.append(node('strong', record.kind === 'digested_block' ? '核心记忆' : record.title || record.timeLabel || '事件记忆'));
     article.append(node('p', record.eventSummary || record.summary || R.MemoryLibraryModel.corePromptText(record)));
+    if(record.timeInference){const explanation=details(article,'时间判断依据');explanation.append(node('p',record.timeInference.reason));}
     if (record.state !== 'active') article.append(node('small', '来源已变化，旧记录保留，当前不参与召回。'));
     const edit = button('查看与编辑', 'edit', article); edit.dataset.id = record.id;
     if (record.id === editId) {
@@ -486,8 +493,8 @@ function exportStatus() {
 function setExportSelection(value) {if(!exportSnapshot)return;for(const check of box.querySelectorAll('[data-cm-export-choice]')){check.checked=value;if(value)exportSnapshot.selected.add(check.value);else exportSnapshot.selected.delete(check.value);}exportStatus();}
 function exportSelected() {
   available();if(!exportSnapshot||exportSnapshot.key!==activeKey)throw Error('请选择当前聊天的导出条目');
-  const ctx=context(),data=E.selectExport(exportSnapshot.data,[...exportSnapshot.selected]);
-  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.4.4'}),'conversation-memory.json');
+  const ctx=context(),data=Time.withSortPositions(E.selectExport(exportSnapshot.data,[...exportSnapshot.selected]));
+  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.5.0'}),'conversation-memory.json');
   box.querySelector('[data-cm-export-status]').textContent=`已发起所选 ${exportSnapshot.selected.size} 条记忆的 JSON 下载。`;
 }
 async function clearCurrentMemory(btn) {
@@ -495,7 +502,7 @@ async function clearCurrentMemory(btn) {
   if(!confirm(`仅清空当前聊天「${context().name2}」的 ${state.periods.length} 条事件、${state.cores.length} 条核心（含手动修改）和失败记录，并将进度归零？\n聊天原文、其他聊天与 API 设置保留。建议先导出备份。清空后自动总结暂停，不会立即调用 API。`)){notice('已取消清空，记忆未改变。');return;}
   if(!state||identity()!==key||memoryStamp(state)!==before)throw Error('聊天或记忆已变化，请重新确认清空范围');
   btn.disabled=true;btn.textContent='正在清空…';job=true;clearTimeout(autoTimer);controller?.pause();vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer);
-  try{await save(E.cleared(state),key);if(identity()!==key)return;clearInjection();pendingImport=null;editId='';page=failurePage=0;exportSnapshot=null;box.querySelector('[data-cm-export]').replaceChildren();box.querySelector('[data-cm-import]').replaceChildren();loadedFloors=E.floors(chat()).length;renderMemories();notice('当前聊天记忆已清空，进度归零，自动总结已暂停。需要原文重做时，在总结设置选择原文来源，再点击补充总结，从第 1 楼开始。');}
+  try{await save(E.cleared(state),key);if(identity()!==key)return;clearInjection();pendingImport=null;editId='';page=failurePage=0;exportSnapshot=null;box.querySelector('[data-cm-export]').replaceChildren();box.querySelector('[data-cm-import]').replaceChildren();loadedFloors=E.floors(chat()).length;renderMemories();notice('当前聊天记忆已清空。点击「补充旧聊天」从头重做。');}
   finally{btn.disabled=false;btn.textContent=label;job=false;renderStatus();if(vectorQueued)queueVectorIndex(false);}
 }
 async function previewImport(file) {
@@ -540,10 +547,10 @@ async function handle(btn) {
     if (generationBusy()) throw new Error('角色仍在回复，请等本楼完成后再总结');
     if(E.invalidFrom(state,chat())>=0)throw new Error('已总结来源有修改，请先确认失效楼层并重算');
     const remaining=E.floors(chat()).length-E.through(state);
-    if(remaining<=0){const pending=(state.failures||[]).filter(row=>row.status==='pending').length;notice(`没有新的待总结楼层。${pending?`有 ${pending} 条失败记录，请展开「失败记录与手动重试」补齐。`:'当前楼层已总结，新增聊天后可继续补充总结。'}`);return;}
-    API.validate(settings());const key=activeKey,label=btn.textContent;btn.disabled=true;btn.textContent='正在补充总结…';job=true;jobCancelled=false;vectorPaused=false;
-    notice(`准备补充总结第 ${E.through(state)+1} 楼起，共 ${remaining} 楼；正在检查摘要规则…`);
-    try { await refreshDetection();if(jobCancelled||identity()!==key||!enabled)return;if(state.suspendAuto)await save({...state,suspendAuto:false},key);if(identity()!==key||!enabled)return;await controller.run(true);if(identity()===key) {if(jobCancelled)notice('补充总结已暂停，已保存的批次保留。');else completionNotice('补充总结');} }
+    if(remaining<=0){const pending=(state.failures||[]).filter(row=>row.status==='pending').length;notice(`没有新的待总结楼层。${pending?`有 ${pending} 条失败记录，请展开「失败记录与手动重试」补齐。`:'当前楼层已总结，新增聊天后可继续补充旧聊天。'}`);return;}
+    API.validate(settings());const key=activeKey,label=btn.textContent;btn.disabled=true;btn.textContent='正在补充旧聊天…';job=true;jobCancelled=false;vectorPaused=false;
+    notice(`正在读取旧聊天，从第 ${E.through(state)+1} 楼开始…`);
+    try { await refreshDetection();if(jobCancelled||identity()!==key||!enabled)return;if(state.suspendAuto)await save({...state,suspendAuto:false},key);if(identity()!==key||!enabled)return;await controller.run(true);if(identity()===key) {if(jobCancelled)notice('补充旧聊天已暂停，已保存的批次保留。');else completionNotice('补充旧聊天');} }
     finally { btn.disabled=false;btn.textContent=label;job=false;renderStatus();if(vectorQueued)queueVectorIndex(false); }
     return;
   }
@@ -555,7 +562,7 @@ async function handle(btn) {
     available(); await refreshDetection();const floor = Math.max(1, Math.floor(settings().previewFloor || 1));
     const source = { ...state, cursor: floor - 1, anchorAt: state.activities.filter(a => a.sourceOrder < floor && !a.timeUnknown).at(-1)?.occurredAt || 0 };
     const result = E.prepare(source, chat(), { ...settings(), batchFloors: 1 });
-    const row = result.prepared.activities[0]; notice(row ? `第 ${floor} 楼（消息索引 ${E.floors(chat())[floor-1].index}），${settings().summarySource==='raw'?'直接使用聊天原文':row.source === 'preset_summary' ? '命中已有摘要' : '未命中摘要，回退正文'}：${row.summary}\n时间：${row.timeLabel}；${row.timeUnknown ? '具体剧情日期未知' : new Date(row.occurredAt).toISOString()}` : '该楼不存在。'); return;
+    const row = result.prepared.activities[0]; notice(row ? `第 ${floor} 楼，${row.source === 'preset_summary' ? '命中当前摘要' : '未命中摘要，使用正文'}：${row.summary}\n时间：${row.timeLabel}` : '该楼不存在。'); return;
   }
   if (action === 'export') {
     chooseExport();return;
@@ -563,6 +570,7 @@ async function handle(btn) {
   if(action==='export-all'||action==='export-none'){setExportSelection(action==='export-all');return;}
   if(action==='export-confirm'){exportSelected();return;}
   if(action==='clear-memory'){await clearCurrentMemory(btn);return;}
+  if(action==='complete-time'){await completeTimes();return;}
   if (action === 'import') { idle(); const input = box.querySelector('[data-cm-file]'); input.value = ''; input.click();notice('请选择记忆 JSON；读取后会显示导入预览。'); return; }
   if (action === 'cancel-import') { pendingImport = null; box.querySelector('[data-cm-import]').replaceChildren();notice('已取消导入。'); return; }
   if (action === 'confirm-import') {
@@ -580,6 +588,7 @@ async function handle(btn) {
     if (failure.operation === 'summary') { try{await controller.retry(failure.id);completionNotice('手动重试');}finally{renderStatus();if(vectorQueued)queueVectorIndex(false);} }
     else if (failure.operation === 'range') await recalculateRange(failure);
     else if (failure.operation === 'digest') await digestMemory(failure);
+    else if (failure.operation === 'time') await completeTimes(failure);
     return;
   }
   if (action === 'edit') { idle(); editId = editId === btn.dataset.id ? '' : btn.dataset.id; renderMemories(); return; }
@@ -603,14 +612,14 @@ async function handle(btn) {
     next.cursor = invalid; next.processedThrough = invalid; next.signatures = next.signatures.slice(0, invalid);
     (next.failures || []).forEach(row => { if (row.status === 'pending' && (row.end > invalid || row.operation === 'digest')) { row.status = 'invalidated'; row.updatedAt = Date.now(); } });
     next.anchorAt = next.activities.filter(a => a.sourceOrder <= invalid && a.occurredAt).at(-1)?.occurredAt || 0;
-    await save(next); notice(`游标调整为 ${invalid}，点击补充总结继续。`); return;
+    await save(next); notice(`游标调整为 ${invalid}，点击补充旧聊天继续。`); return;
   }
   if (action === 'range') { await recalculateRange(); return; }
   if (action === 'digest') { await digestMemory(); return; }
 }
 async function recalculateRange(failure) {
     idle(); if (generationBusy()) throw new Error('角色仍在回复，请等本楼完成后再重算');
-    const cfg = settings(), snapshot = chat(), list = E.floors(snapshot); API.validate(cfg);
+    const cfg = {...settings(),summarySource:'raw'}, snapshot = chat(), list = E.floors(snapshot); API.validate(cfg);
     let from = Number(failure?.start || cfg.rangeStart), to = Number(failure?.end || cfg.rangeEnd);
     if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from || to > list.length) throw new Error('请输入有效的起止楼层');
     const sourceFloors = new Map(state.activities.filter(a => localSource(a,state)).map(a => [a.id,a.sourceOrder]));
@@ -637,7 +646,7 @@ async function recalculateRange(failure) {
     staged.anchorAt = staged.activities.filter(a => a.sourceOrder < from && !a.timeUnknown).at(-1)?.occurredAt || 0;
     const sourceUnchanged = () => { const fresh = E.floors(chat()); return enabled && identity() === key && state && memoryStamp(state) === before && list.every((f,i) => fresh[i]?.signature === f.signature); };
     const combined = { ok: true, count: 0, history: [] }; let exhausted = false;
-    const rangeController = E.create({ getState: () => staged, getChat: () => snapshot.slice(0, list[to-1].index+1), getSettings: settings,
+    const rangeController = E.create({ getState: () => staged, getChat: () => snapshot.slice(0, list[to-1].index+1), getSettings: () => ({...settings(),summarySource:'raw'}),
       isCurrent: sourceUnchanged, save: async next => { staged = next; }, request: request => API.generate(settings(), request.prompt), operation: 'range',
       batchResult: result => { const beforeCount = combined.count; combined.count += result.count; combined.history.push(...result.history.map(row => ({...row,attempt:beforeCount+row.attempt}))); combined.ok = result.ok; combined.reason = result.reason; },
       recordFailure: async () => { exhausted = true; const next = structuredClone(state); E.recordFailure(next, info, combined); await save(next,key); },
@@ -683,6 +692,44 @@ async function digestMemory(failure) {
       await save(next, key); completionNotice('核心整理');
     } finally { job = false;renderStatus();if(vectorQueued)queueVectorIndex(false); } return;
 }
+async function completeTimes(failure) {
+  if(storySave)await storySave;
+  idle();if(generationBusy())throw Error('角色仍在回复，请等本楼完成后再补全时间');API.validate(settings());
+  if(E.invalidFrom(state,chat())>=0)throw Error('记忆来源已修改，请先重算再补全时间');
+  const key=activeKey,token=generation,cfg=settings(),connection=JSON.stringify([cfg.apiUrl,cfg.apiKey,cfg.model,cfg.timezoneOffset]);
+  const signature=(memory,ids)=>JSON.stringify(memory.periods.filter(row=>ids.includes(row.id)));
+  if(failure&&failure.blockSignature!==signature(state,failure.blockIds)){
+    const next=structuredClone(state),row=next.failures.find(row=>row.id===failure.id);row.status='invalidated';row.invalidationReason='这些记忆已变化，请重新点击一键补全时间。';await save(next,key);notice(row.invalidationReason);return;
+  }
+  let ids=Time.ordered(state).filter(e=>Time.unknown(e.row)&&(!failure||failure.blockIds.includes(e.row.id))).map(e=>e.row.id);
+  if(!ids.length){notice('没有需要补全时间的记忆。');return;}
+  job=true;jobCancelled=false;clearTimeout(autoTimer);renderStatus();let filled=0,failed=0;
+  let before=memoryStamp(state);
+  const current=()=>enabled&&!jobCancelled&&generation===token&&identity()===key&&state&&memoryStamp(state)===before&&E.invalidFrom(state,chat())<0&&JSON.stringify([settings().apiUrl,settings().apiKey,settings().model,settings().timezoneOffset])===connection;
+  try{
+    // A second pass can use dates discovered later in the first pass as anchors for earlier events.
+    for(let pass=0;pass<2&&ids.length;pass++){
+      const unresolved=[];let progress=0;
+      while(ids.length){
+        if(!current()){notice('补全时间已暂停，已保存的结果保留。');return;}
+        const original=structuredClone(state),batch=Time.prepare(original,cfg,ids),info={id:failure?.id,operation:'time',blockIds:batch.ids,blockSignature:signature(original,batch.ids)};
+        notice(`正在补全 ${batch.ids.length} 条记忆的时间…`);
+        const result=await E.retryTask({isCurrent:current,isPaused:()=>jobCancelled,getSettings:settings,
+          progress:p=>notice(`补全时间：${p.reason}${p.retry?'，正在重试…':'，已记入失败记录。'}`),
+          task:async()=>Time.apply(original,batch,await API.generate(cfg,batch.prompt))});
+        if(result.cancelled||!current()){notice('补全时间已暂停，已保存的结果保留。');return;}
+        const next=result.ok?result.value:structuredClone(state);next.failures=structuredClone(state.failures);
+        const prior=failure||state.failures.find(row=>row.operation==='time'&&row.status==='pending'&&row.blockSignature===info.blockSignature&&JSON.stringify(row.blockIds)===JSON.stringify(batch.ids));
+        if(prior)info.id=prior.id;if(!result.ok||prior)E.recordFailure(next,info,result);
+        if(result.ok){const still=batch.ids.filter(id=>Time.unknown(next.periods.find(row=>row.id===id)));unresolved.push(...still);const count=batch.ids.length-still.length;filled+=count;progress+=count;}else failed+=batch.ids.length;
+        await save(next,key);before=memoryStamp(state);ids=ids.filter(id=>!batch.ids.includes(id));
+      }
+      if(!progress||failure)break;ids=unresolved;
+    }
+    const left=Time.ordered(state).filter(e=>Time.unknown(e.row)).length;
+    notice(`已补全 ${filled} 条时间${left?`，${left} 条仍待确认`:''}。${failed?'失败原因已保存，可在失败记录重试。':left?'线索不足的保留未知。':'导出 JSON 时会携带这些剧情时间。'}`);
+  }finally{job=false;renderStatus();if(vectorQueued)queueVectorIndex(false);}
+}
 function retireSources(next, from, to) {
   const affected = new Set(next.activities.filter(a => localSource(a,next) && a.sourceOrder >= from && a.sourceOrder <= to).map(a => a.id));
   const retired = new Set();
@@ -702,7 +749,7 @@ async function loadChat() {
   activeKey = identity(); renderStatus(); renderMemories(); renderFailures(); if (!activeKey) return;
   const key = activeKey; const loaded = await read(key); if (token !== generation || identity() !== key) return;
   state = loaded; state.failures ||= []; state.processedThrough = E.through(state);
-  controller = E.create({ getState: () => state, getChat: chat, getSettings: settings, isCurrent: () => enabled && activeKey === key && identity() === key,
+  controller = E.create({ getState: () => state, getChat: chat, getSettings: () => ({...settings(),summarySource:automaticController===controller?'auto':'raw'}), isCurrent: () => enabled && activeKey === key && identity() === key,
     save: next => save(next, key), request: request => API.generate(settings(), request.prompt),
     progress: progress => { renderStatus(); progressNotice(progress); } });
   renderStatus(); renderMemories(); renderFailures();await refreshDetection();scheduleAuto();queueVectorIndex();

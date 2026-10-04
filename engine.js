@@ -31,7 +31,7 @@
     }).filter(Boolean).map(function (floor, index) { floor.floor = index + 1; return floor; });
   }
   function empty(charId) { return { charId: charId, cursor: 0, processedThrough: 0, failures: [], signatures: [], activities: [], periods: [], cores: [], version: 1 }; }
-  function cleared(state) { return Object.assign(empty(state.charId),{summarySource:state.summarySource==='raw'?'raw':'auto',suspendAuto:true}); }
+  function cleared(state) { return Object.assign(empty(state.charId),{summarySource:state.summarySource==='raw'?'raw':'auto',storyTimeline:state.storyTimeline||'',suspendAuto:true}); }
   function sourceActivityIds(state,records) {
     var ids=new Set();
     function direct(row){[row].concat(row.facts||[],row.items||[]).forEach(function(part){['activityRefs','evidenceIds','sourceActivityIds'].forEach(function(key){(part[key]||[]).forEach(function(id){ids.add(id);});});});}

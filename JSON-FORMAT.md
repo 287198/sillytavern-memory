@@ -36,6 +36,10 @@
 
 `at` 是兼容存储/索引字段，不能覆盖 `timeUnknown` 或冒充剧情发生时间。跨端召回必须尊重未知时间。
 
+酒馆插件 0.5.0 的 AI 补时间结果在 `timeLabel` 标明“推测”，`timeAnchors` 保留依据、精度和范围。用户仅提供月份、季节或年份时，`periodStart` / `periodEnd` 保存大致范围，不能把范围起点解释成确切发生日；跨端应显示可读标签与精度。
+
+仍未知的事件导出时 `occurredAt` 保持 0，`at` 仅作为列表排序位置：根据前后已知事件与 `sourceOrder` 安置，整段无日期时保留段内顺序。排序位置不能用于补日期、事实有效时间或显示成真实日期。故事时间线背景只保存在当前聊天，未新增私有顶层格式。
+
 ## 活动、时期和核心
 
 活动可带 `module`、`actionType`、`consolidatedInto` 等字段。酒馆活动以当前选定 swipe 的消息或提取摘要为来源，`source` 标明 `preset_summary` 或 `message_body`。

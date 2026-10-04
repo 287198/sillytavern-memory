@@ -237,7 +237,7 @@ async function testGeneration(btn) {
   }catch(error){status.textContent=E.failureReason(error,cfg);diagnostic=E.safeDiagnostic(error.diagnostic,cfg)||diagnostic;}
   finally{
     if(signature(settings())!==signature(cfg)){status.textContent='总结连接配置已变化，请重新测试';diagnostic=null;}
-    if(diagnostic)diagnosticView(host,{pluginVersion:'0.4.2',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
+    if(diagnostic)diagnosticView(host,{pluginVersion:'0.4.3',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
   }
 }
 async function fetchModels(btn,kind = 'summary') {
@@ -275,8 +275,9 @@ function shell() {
   const autoPolicy=node('p');autoPolicy.dataset.cmAutoPolicy='';autoPolicy.setAttribute('role','status');summary.append(autoPolicy);
   const sourceLabel=node('label','总结来源','cm-field'),sourceSelect=node('select');sourceSelect.className='text_pole';sourceSelect.dataset.setting='summarySource';sourceSelect.setAttribute('aria-label','总结来源');
   for(const [value,label] of [['auto','摘要优先，缺失时用原文'],['raw','仅从聊天原文精炼（旧聊天/混用预设）']]){const option=node('option',label);option.value=value;sourceSelect.append(option);}
-  sourceLabel.append(sourceSelect,node('small','按当前聊天保存。原文模式读取完整正文，跳过摘要和时间正则/JSON 字段；日期按正文证据或锚点确定。切换来源不会重写已有记忆；全部重做可先在导入导出清空当前聊天记忆，再点补充总结。'));summary.append(sourceLabel);
+  sourceLabel.append(sourceSelect,node('small','按当前聊天保存。原文模式读取完整消息，让模型跨预设判别主线与附加内容，只写主线经历；跳过摘要和时间正则/JSON 字段。切换来源不会重写已有记忆；全部重做可先在导入导出清空当前聊天记忆，再点补充总结。'));summary.append(sourceLabel);
   const identity=node('p');identity.dataset.cmDiaryIdentity='';summary.append(identity);
+  const plot=details(summary,'正文判别与忽略记录');plot.append(node('p','模型按语义和剧情连续性判断，不依赖单一预设标签。摘要、大总结用于核对主线；明确非正史小剧场、场外写作要求和附加输出不当成真实经历。混合楼层保留主线部分，真实剧情中的写报告、做梦等行为仍可保留。整楼忽略记录仅保存在当前浏览器，不参与召回和记忆导出。'));const plotRecords=node('div');plotRecords.dataset.cmPlotDecisions='';plot.append(plotRecords);
   const connect = details(connections, '独立总结 API', true);
   field(connect, 'apiUrl', 'API 地址', 'url', 'OpenAI 兼容地址，例如 https://服务地址/v1。需要服务允许浏览器跨域。');
   field(connect, 'apiKey', 'API Key', 'password'); field(connect, 'saveKey', '保存密钥到酒馆设置', 'checkbox', '未勾选时密钥仅在本次页面会话中使用。');
@@ -395,6 +396,7 @@ function renderStatus() {
   const coverage=E.coverage(state,total,invalid,floors),floorStats=`已总结 ${coverage.counts.summarized} / ${total} 楼 · 待总结 ${coverage.counts.pending} 楼 · 总结失败 ${coverage.counts.failed} 楼`;
   const report=box.querySelector('[data-cm-floor-coverage]');report.replaceChildren();for(const [key,label] of [['summarized','已总结'],['pending','待总结'],['failed','总结失败，需手动重试']])report.append(node('p',`${label}：${coverage[key].length?coverage[key].map(([from,to])=>from===to?`第 ${from} 楼`:`第 ${from}–${to} 楼`).join('、'):'无'}`));
   box.querySelector('[data-cm-diary-identity]').textContent=`写日记的人：${settings().characterName||'当前角色'}（char），“我”始终是这个角色；对方：${settings().userName||'对方'}（user）。原文叙述人称不会改变日记身份。`;
+  const ignored=(state?.activities||[]).filter(row=>row.state==='archived_non_plot'),plotRecords=box.querySelector('[data-cm-plot-decisions]'),plotStamp=JSON.stringify(ignored.map(row=>[row.id,row.sourceOrder,row.sourceDecision]));if(plotRecords.dataset.stamp!==plotStamp){plotRecords.dataset.stamp=plotStamp;plotRecords.replaceChildren(node('p',ignored.length?`已检查并忽略 ${ignored.length} 楼（不生成事件）：`:'暂无整楼忽略记录。混合楼层的附加内容由模型在提炼时过滤。'));for(const row of ignored)plotRecords.append(node('p',`第 ${row.sourceOrder} 楼：${row.sourceDecision?.reason||'没有可利用的主线事实'}`));}
   const cfg=settings(),old=historicalRemaining();box.querySelector('[data-cm-auto-policy]').textContent=state?.suspendAuto?'当前聊天自动总结已暂停。选择来源后点击补充总结，或重新开启自动总结。':!cfg.auto?'自动总结已关闭；仍可点击补充总结手动处理。':old&&!cfg.autoBackfill?`当前有 ${old} 楼旧聊天尚未检查，自动补旧聊天已关闭。请先手动补充总结，或明确开启自动补旧聊天。`:'自动总结已开启；新楼按触发阈值处理。'+(cfg.autoBackfill?'允许自动补齐尚未检查的旧楼；已失败批次仍需手动重试。':'旧楼已检查，不会自动重试旧失败批次。');
   box.querySelector('[data-cm-stats]').textContent = state ? `${context().name2} · ${floorStats} · 已保存 ${state.periods.length} 条事件、${state.cores.length} 条核心记忆${pending ? ` · 待重试 ${pending} 批，已保存的记忆仍可使用；请到「失败记录」手动重试。` : ''}${invalid >= 0 ? ` · 第 ${invalid + 1} 楼起来源有修改，列入待总结；请先确认重算` : ''}` : '请选择单角色聊天';
   management?.status(state?`${context().name2} · ${floorStats} · 已存 ${state.periods.length} 条事件、${state.cores.length} 条核心${pending?` · 待重试 ${pending} 批`:''}`:'请选择单角色聊天',pending);
@@ -418,7 +420,7 @@ function renderFailures() {
     for (const item of row.history || []) history.append(node('p', `第 ${item.attempt} 次 · ${new Date(item.at).toLocaleString()} · ${item.reason}`));
     article.append(history);
     if((row.history||[]).some(item=>item.diagnostic)){
-      const cfg=settings();diagnosticView(article,{pluginVersion:'0.4.2',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
+      const cfg=settings();diagnosticView(article,{pluginVersion:'0.4.3',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
     }else article.append(node('small','旧记录未保存响应结构；新版手动重试后可查看诊断。验证错误会直接显示具体校验原因。'));
     if (row.status === 'pending') { const retry = button('手动重试', 'retry-failure', article); retry.dataset.id = row.id; }
     host.append(article);
@@ -481,7 +483,7 @@ function setExportSelection(value) {if(!exportSnapshot)return;for(const check of
 function exportSelected() {
   available();if(!exportSnapshot||exportSnapshot.key!==activeKey)throw Error('请选择当前聊天的导出条目');
   const ctx=context(),data=E.selectExport(exportSnapshot.data,[...exportSnapshot.selected]);
-  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.4.2'}),'conversation-memory.json');
+  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.4.3'}),'conversation-memory.json');
   box.querySelector('[data-cm-export-status]').textContent=`已发起所选 ${exportSnapshot.selected.size} 条记忆的 JSON 下载。`;
 }
 async function clearCurrentMemory(btn) {

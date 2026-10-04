@@ -39,7 +39,7 @@
   }
   function exportEntries(state) {
     var entries=[],needed=sourceActivityIds(state,(state.periods||[]).concat(state.cores||[]));
-    ['cores','periods','activities'].forEach(function(group){(state[group]||[]).forEach(function(row){if(group==='activities'&&needed.has(row.id))return;entries.push({key:JSON.stringify([group,row.id]),id:row.id,group:group,title:group==='cores'?'核心记忆（整组）':group==='periods'?'事件记忆':'未合并的活动',text:group==='cores'?model.corePromptText(row):row.eventSummary||row.summary||'',label:row.title||row.timeLabel||''});});});return entries;
+    ['cores','periods','activities'].forEach(function(group){(state[group]||[]).forEach(function(row){if(group==='activities'&&(needed.has(row.id)||row.state==='archived_non_plot'))return;entries.push({key:JSON.stringify([group,row.id]),id:row.id,group:group,title:group==='cores'?'核心记忆（整组）':group==='periods'?'事件记忆':'未合并的活动',text:group==='cores'?model.corePromptText(row):row.eventSummary||row.summary||'',label:row.title||row.timeLabel||''});});});return entries;
   }
   function selectExport(state,selection) {
     var selected=new Set(selection),entries=exportEntries(state),known=new Set(entries.map(function(row){return row.key;}));
@@ -50,7 +50,7 @@
     var coreIds=new Set(data.cores.map(function(row){return row.id;}));
     data.periods.forEach(function(row){if(row.digestedInto&&!coreIds.has(row.digestedInto)||!data.cores.length&&row.digestionState==='digested'){delete row.digestedInto;delete row.digestionState;}});
     var needed=sourceActivityIds(state,data.periods.concat(data.cores));
-    data.activities=(state.activities||[]).filter(function(row){return needed.has(row.id)||selected.has(JSON.stringify(['activities',row.id]));}).map(copy);return data;
+    data.activities=(state.activities||[]).filter(function(row){return row.state!=='archived_non_plot'&&(needed.has(row.id)||selected.has(JSON.stringify(['activities',row.id])));}).map(function(row){var result=copy(row);if(typeof row.plotSummary==='string')result.summary=row.plotSummary;delete result.plotSummary;delete result.sourceDecision;return result;});return data;
   }
   function through(state) { return Math.max(Number(state.cursor) || 0, Number(state.processedThrough) || 0); }
   function coverage(state,total,invalid,currentFloors) {
@@ -62,6 +62,9 @@
   function speaker(floor,cfg) {return {speakerRole:floor.user?'user':floor.message.extra&&floor.message.extra.type==='narrator'?'narrator':'char',speakerName:floor.message.name||(floor.user?cfg.userName||'对方':cfg.characterName||'当前角色')};}
   function diaryIdentity(cfg) {
     return '日记身份固定：“我”始终是 char，写日记的人是 '+JSON.stringify(cfg.characterName||'当前角色')+'；user '+JSON.stringify(cfg.userName||'对方')+' 是对方。所有 summary 都必须写成 char 的第一人称精炼日记。来源中的“我／你／他／她”和消息发言人只帮助核对人物，不能机械地把发言人当作叙述者；先按姓名、动作主客体与上下文消歧，再转成 char 视角。原文或已有摘要即使使用 user 第一人称，也不能把 user 写成日记里的“我”。例如 user 说“我扶着你坐下”，char 的日记应写“对方扶着我坐下”；叙述者写“我走向【char姓名】”，应写“对方向我走来”。证据不清时不猜人物、感受或动机，保留明确事实。';
+  }
+  function plotPolicy() {
+    return '主线正文判别：旧聊天可能混用很多预设，必须按语义、上下文和剧情连续性判断，不能依赖固定标签或仅凭关键词删除。先区分主线实际发生的经历、剧情回顾、非正史小剧场／平行设想、排版状态栏和场外写作交流，再写 char 第一人称日记。摘要、大总结是核对主线事实的参考，不是角色做了“总结”这件事；只在回顾中出现的可核验主线事实也可利用，重复事实合并，冲突或归属不明时不编造。混合楼层只提炼其中主线部分，不能因为有附加内容就忽略整楼。明确非正史的番外、假设、梦境中的虚构事件不能当作现实经历；真实剧情中写报告、表演或做梦这一行为仍可保留，不能按“报告／梦境／小剧场”关键词一刀切。场外“请总结剧情／生成报告”及模型完成附加任务的文本不能记成我实际经历了这些事。附加内容不能引入主线事实、关系、约定、日期或感受。时间只从可归属主线的证据判断，有冲突保持未知。\n输出仍为 memories + archivedActivityIds；额外输出 nonPlotActivities 数组。只有整楼没有任何可利用主线事实时才可标记 {activityId:来源ID,kind:meta_request|meta_output|noncanon_side_story|auxiliary_only,reason:具体判别理由}；其ID不能再出现在任何记忆或事实中，不能把包含主线事实的回顾整楼丢弃。无法判断时保留明确主线事实，不强行编事件。每个来源必须用于记忆或给出整楼忽略理由，禁止静默漏楼。';
   }
   function invalidFrom(state, chat) {
     var list = floors(chat); var signatures = state.signatures || []; var covered = through(state);
@@ -140,7 +143,7 @@
       size += summary.length + 200;
     }
     var prepared = { charId: state.charId, activities: rows };
-    var prompt = diaryIdentity(cfg)+'\n\n'+rules.MemoryJournal.buildConsolidationPrompt(prepared, { characterName: cfg.characterName, userName: cfg.userName });
+    var prompt = diaryIdentity(cfg)+'\n\n'+plotPolicy()+'\n\n'+rules.MemoryJournal.buildConsolidationPrompt(prepared, { characterName: cfg.characterName, userName: cfg.userName });
     prompt+='\n\n本批原文身份表：\n'+JSON.stringify(rows.map(function(row){return Object.assign({activityId:row.id,floor:row.sourceOrder},speaker(list[row.sourceOrder-1],cfg));}));
     prompt += "\n\n酒馆时间适配：recordedAt 仅供记录排序，不能用它推断剧情发生日期。发言人由 participants 标明，user 的第一人称不能当作 char 的第一人称。以下是本批可核验的剧情时间依据，unknown=true 时不得补猜具体年月日：\n" + JSON.stringify(rows.map(function (row) {
       return { id: row.id, floor: row.sourceOrder, expression: row.timeLabel, occurredAt: row.occurredAt, unknown: row.timeUnknown };
@@ -162,13 +165,31 @@
   }
   function process(batch, response) {
     var now = Date.now();
-    var output = rules.MemoryJournal.createPeriodBlocks(batch.prepared, response, now, true);
+    var parsed;try { parsed=typeof response==='string'?JSON.parse(response.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'')):copy(response); } catch(ignore) {}
+    var decisions=Object.create(null),plotTexts=Object.create(null),byId=Object.create(null);
+    batch.prepared.activities.forEach(function(row){byId[row.id]=row;});
+    if(parsed&&Object.prototype.hasOwnProperty.call(parsed,'nonPlotActivities')) {
+      if(!Array.isArray(parsed.nonPlotActivities))throw new Error('正文判别：忽略记录必须是数组');
+      parsed.nonPlotActivities.forEach(function(row){
+        if(!row||typeof row.activityId!=='string'||!byId[row.activityId]||decisions[row.activityId]||!['meta_request','meta_output','noncanon_side_story','auxiliary_only'].includes(row.kind)||typeof row.reason!=='string'||!row.reason.trim())throw new Error('正文判别：忽略记录包含未知／重复来源、无效类型或空理由');
+        decisions[row.activityId]={kind:row.kind,reason:row.reason.trim()};
+      });
+      function references(row){if(!row||typeof row!=='object')return;['activityIds','sourceActivityIds','activityRefs','evidenceIds'].forEach(function(key){(Array.isArray(row[key])?row[key]:[]).forEach(function(id){if(decisions[id])throw new Error('正文判别：同一来源不能同时写入记忆并整楼忽略');});});['keyFacts','facts'].forEach(function(key){(Array.isArray(row[key])?row[key]:[]).forEach(references);});}
+      ['memories','entries','eventChains','facts'].forEach(function(key){(Array.isArray(parsed[key])?parsed[key]:[]).forEach(references);});
+      parsed.archivedActivityIds=Array.from(new Set((Array.isArray(parsed.archivedActivityIds)?parsed.archivedActivityIds:[]).concat(Object.keys(decisions))));
+    }
+    // Feed the model's canonical prose to fact extraction; retain full original evidence locally.
+    if(parsed&&Array.isArray(parsed.memories))parsed.memories.forEach(function(memory){if(memory&&typeof memory.summary==='string'&&memory.summary.trim())(Array.isArray(memory.activityIds)?memory.activityIds:[]).forEach(function(id){(plotTexts[id]||=([])).push(memory.summary.trim());});});
+    var prepared={charId:batch.prepared.charId,activities:batch.prepared.activities.map(function(row){return Object.assign({},row,{summary:decisions[row.id]?'':plotTexts[row.id]?plotTexts[row.id].join('\n'):row.summary});})};
+    var output = rules.MemoryJournal.createPeriodBlocks(prepared, parsed||response, now, true);
     output.activities = output.activities.map(function (row) {
       var original = batch.prepared.activities.find(function (src) { return src.id === row.id; });
-      return Object.assign({}, row, { occurredAt: original.occurredAt, knownAt: original.knownAt, timeUnknown: original.timeUnknown,
+      return Object.assign({}, row, { summary:original.summary,plotSummary:decisions[row.id]?'':row.summary,state:decisions[row.id]?'archived_non_plot':row.state,sourceDecision:decisions[row.id]||null,occurredAt: original.occurredAt, knownAt: original.knownAt, timeUnknown: original.timeUnknown,
         timeLabel: original.timeLabel, timeAnchors: original.timeAnchors, createdAt: now, updatedAt: now });
     });
     output.blocks.forEach(function (block) {
+      var memory=parsed&&Array.isArray(parsed.memories)&&parsed.memories.find(function(row){return row&&Array.isArray(row.activityIds)&&row.activityIds.length===block.activityRefs.length&&row.activityIds.every(function(id){return block.activityRefs.indexOf(id)>=0;});});
+      if(memory&&typeof memory.summary==='string'&&memory.summary.trim()){block.eventSummary=memory.summary.trim();block.eventSummaryVersion=2;}
       var sources = batch.prepared.activities.filter(function (row) { return block.activityRefs.indexOf(row.id) >= 0; });
       var dated = sources.filter(function (row) { return !row.timeUnknown; });
       var fullyDated = dated.length === sources.length;
@@ -182,7 +203,11 @@
       block.timeLabel = fullyDated ? dated[0].timeLabel : "剧情时间未知";
       block.title = block.timeLabel;
       block.sourceOrder = sources[0].sourceOrder;
-      block.summary = "时期: " + block.timeLabel + "\n经历:\n" + sources.map(function (row) { return "  - 第" + row.sourceOrder + "楼｜" + row.summary; }).join("\n");
+      block.summary = "时期: " + block.timeLabel + "\n经历:\n" + sources.map(function(row){return "  - 第"+row.sourceOrder+"楼｜"+(plotTexts[row.id]?plotTexts[row.id].join('\n'):row.summary);}).join('\n');
+      // Canonical text is now the only search evidence. Overlapping pairs avoid
+      // losing Chinese lexical hits when its pronouns change token alignment.
+      var terms=[];String(block.eventSummary||'').match(/[\u3400-\u9fff]+|[a-z0-9]+/gi)?.forEach(function(run){if(/^[a-z0-9]+$/i.test(run))terms.push(run.toLowerCase());else for(var t=0;t<run.length-1;t++)terms.push(run.slice(t,t+2));});
+      block.keywords=Array.from(new Set((block.keywords||[]).concat(terms))).slice(0,120);
       (block.facts || []).forEach(function (fact) {
         var evidence = sources.filter(function (row) { return (fact.evidenceIds || []).indexOf(row.id) >= 0; });
         fact.occurredAt = evidence.length && evidence.every(function (row) { return !row.timeUnknown; }) ? Math.min.apply(Math, evidence.map(function (row) { return row.occurredAt; })) : 0;
@@ -194,7 +219,8 @@
   }
   function storeFor(state) {
     return {
-      listActivities: async function () { return state.activities.map(function (row) {
+      listActivities: async function () { return state.activities.filter(function(row){return row.state!=='archived_non_plot';}).map(function (row) {
+        row=Object.assign({},row,{summary:row.plotSummary==null?row.summary:row.plotSummary});
         return row.timeUnknown ? Object.assign({}, row, { at: 0, atVirtual: 0, occurredAt: 0, validFrom: 0 }) : row;
       }); },
       listPeriodBlocks: async function () { return state.periods; },

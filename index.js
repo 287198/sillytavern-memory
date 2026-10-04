@@ -17,6 +17,8 @@ let sessionVectorKey = '', regexModule = null, detectionToken = 0, detectionCand
 let vectorTimer=null,vectorTask=null,vectorQueued=false,vectorPaused=false,vectorEpoch=0;
 let actionFeedback=null;
 let management=null;
+let hostIsGenerating=null;
+const finishedProcessors=new WeakSet();
 const context = () => SillyTavern.getContext();
 const database = new Promise((resolve, reject) => {
   const request = indexedDB.open('ConversationMemoryPlugin', 1);
@@ -173,8 +175,11 @@ function available() {
 }
 function idle() { available(); if (job || controller?.busy()) throw new Error('总结任务运行中，请先暂停并等待当前请求结束'); }
 function generationBusy() {
-  const processor = context().streamingProcessor;
-  return generating || Boolean(processor && (processor.isStreaming || processor.isFinished === false));
+  const ctx=context(),read=typeof ctx.isGenerating==='function'?()=>ctx.isGenerating():hostIsGenerating;
+  if(read){try{const busy=read();if(typeof busy==='boolean')return generating=busy;}catch{ /* Older hosts fall back to lifecycle events. */ }}
+  const processor = ctx.streamingProcessor;
+  const streaming=processor&&!finishedProcessors.has(processor)&&!processor.isStopped&&!processor.abortController?.signal.aborted&&processor.isFinished!==true&&(processor.isStreaming===true||processor.isFinished===false);
+  return generating || Boolean(streaming);
 }
 function node(tag, text, cls) {
   const el = document.createElement(tag); if (text != null) el.textContent = text; if (cls) el.className = cls; return el;
@@ -328,8 +333,8 @@ function renderStatus() {
   if (!box) return;
   const total = E.floors(chat()).length; const invalid = state ? E.invalidFrom(state, chat()) : -1;
   const pending = (state?.failures || []).filter(row => row.status === 'pending').length;
-  box.querySelector('[data-cm-stats]').textContent = state ? `${context().name2} · 已总结 ${state.cursor} / ${total} 楼 · 已检查至 ${E.through(state)} 楼 · 下一批从 ${E.through(state) + 1} 楼 · 事件 ${state.periods.length} 条${pending ? ` · 待重试 ${pending} 条` : ''}${invalid >= 0 ? ` · 第 ${invalid + 1} 楼起来源有修改` : ''}` : '请选择单角色聊天';
-  management?.status(state?`${context().name2} · ${state.cursor} / ${total} 楼 · ${state.periods.length} 条事件${pending?` · ${pending} 条待重试`:''}`:'请选择单角色聊天',pending);
+  box.querySelector('[data-cm-stats]').textContent = state ? `${context().name2} · 连续补齐 ${state.cursor} / ${total} 楼 · 已检查至 ${E.through(state)} 楼 · 已保存 ${state.periods.length} 条事件、${state.cores.length} 条核心记忆${E.through(state)<total?` · 下一批从 ${E.through(state)+1} 楼`:''}${pending ? ` · 待重试 ${pending} 批。失败楼层会阻挡连续进度，已保存的记忆仍可使用；请到「失败记录」手动重试。` : ''}${invalid >= 0 ? ` · 第 ${invalid + 1} 楼起来源有修改` : ''}` : '请选择单角色聊天';
+  management?.status(state?`${context().name2} · 已存 ${state.periods.length} 条事件、${state.cores.length} 条核心 · 已检查 ${E.through(state)} / ${total} 楼 · 连续补齐 ${state.cursor} / ${total} 楼${pending?` · 待补 ${pending} 批`:''}`:'请选择单角色聊天',pending);
   box.querySelector('[data-cm-recall]').textContent = lastRecall || '本次尚未注入记忆。';
 }
 function renderFailures() {
@@ -453,7 +458,7 @@ async function handle(btn) {
     available(); const ctx = context();
     download(R.MemoryTransfer.serialize(state, { id: activeKey, name: ctx.name2, userName: ctx.name1,
       source: { application: 'sillytavern', characterId: ctx.characters[ctx.characterId].avatar, chatId: ctx.getCurrentChatId?.() || ctx.chatId } },
-      { name: 'sillytavern-memory', version: '0.3.0' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
+      { name: 'sillytavern-memory', version: '0.3.1' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
   }
   if (action === 'import') { idle(); const input = box.querySelector('[data-cm-file]'); input.value = ''; input.click();notice('请选择记忆 JSON；读取后会显示导入预览。'); return; }
   if (action === 'cancel-import') { pendingImport = null; box.querySelector('[data-cm-import]').replaceChildren();notice('已取消导入。'); return; }
@@ -589,7 +594,7 @@ function retireSources(next, from, to) {
 function localSource(row, memory) { return (row.sourceRefs || []).some(ref => ref.startsWith('sillytavern:' + memory.charId + ':floor:')); }
 async function loadChat() {
   if (!enabled) return;
-  const token = ++generation; controller?.pause(); jobCancelled = true;vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer); clearInjection(); state = null; pendingImport = null; editId = ''; page = failurePage = 0;
+  const token = ++generation; generating=false;controller?.pause(); jobCancelled = true;vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer); clearInjection(); state = null; pendingImport = null; editId = ''; page = failurePage = 0;
   activeKey = identity(); renderStatus(); renderMemories(); renderFailures(); if (!activeKey) return;
   const key = activeKey; const loaded = await read(key); if (token !== generation || identity() !== key) return;
   state = loaded; state.failures ||= []; state.processedThrough = E.through(state);
@@ -602,7 +607,7 @@ function scheduleAuto() {
   clearTimeout(autoTimer);
   if (!enabled || !settings().auto || !state) return;
   autoTimer = setTimeout(async () => {
-    try { if (!job && !generationBusy()) { API.validate(settings()); await controller.run(false); renderStatus(); } }
+    try { if (enabled&&state&&controller&&activeKey===identity()&&!job&&!generationBusy()) { API.validate(settings());const key=activeKey,running=controller,before=E.through(state);await running.run(false);if(activeKey===key&&identity()===key&&controller===running){renderStatus();if(E.through(state)>before)completionNotice('自动总结');} } }
     catch (error) { notice(error.message); }
     finally{if(vectorQueued)queueVectorIndex(false);}
   }, 800);
@@ -634,14 +639,18 @@ globalThis.conversationMemoryInterceptor = async function (requestChat, _context
   } catch (error) { clearInjection(); notice('本次记忆召回未完成：' + error.message); }
 };
 async function init() {
+  // STARTED also fires for prompt dry runs and slash commands which may never emit ENDED.
+  // The host's live flag is authoritative, including when re-enabling during a reply.
+  try{const host=await import('/script.js');if(typeof host.isGenerating==='function')hostIsGenerating=host.isGenerating;else if(typeof host.is_send_press==='boolean')hostIsGenerating=()=>host.is_send_press;}catch{ /* Support hosts exposing only getContext and generation events. */ }
   shell(); await loadChat(); const ctx = context(); const types = ctx.eventTypes || ctx.event_types;
   ctx.eventSource.on(types.CHAT_CHANGED, () => loadChat().catch(error => notice(error.message)));
-  if (types.GENERATION_STARTED) ctx.eventSource.on(types.GENERATION_STARTED, () => { generating = true; clearTimeout(autoTimer); });
-  if (types.GENERATION_ENDED) ctx.eventSource.on(types.GENERATION_ENDED, async () => { generating = false;renderStatus();await refreshDetection();scheduleAuto();queueVectorIndex(false); });
+  if (types.GENERATION_STARTED) ctx.eventSource.on(types.GENERATION_STARTED, (type,options,dryRun) => { if(dryRun||type==='quiet')return;generating = true; clearTimeout(autoTimer); });
+  const generationFinished=async()=>{generating=false;const processor=context().streamingProcessor;if(processor&&typeof processor==='object')finishedProcessors.add(processor);renderStatus();try{await refreshDetection();}catch(error){notice(error.message);}finally{scheduleAuto();queueVectorIndex(false);}};
+  for(const name of ['GENERATION_ENDED','GENERATION_STOPPED'])if(types[name])ctx.eventSource.on(types[name],generationFinished);
   for(const name of ['OPENAI_PRESET_CHANGED_AFTER','SETTINGS_UPDATED','PRESET_CHANGED'])if(types[name])ctx.eventSource.on(types[name],()=>refreshDetection().catch(error=>notice(error.message)));
   for (const name of ['MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED']) if (types[name]) ctx.eventSource.on(types[name], () => { renderStatus(); scheduleAuto(); });
 }
-export function onDisable() { enabled = false;management?.setEnabled(false); generation++; jobCancelled = true;vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer); clearTimeout(autoTimer); controller?.pause(); clearInjection(); }
+export function onDisable() { enabled = false;generating=false;management?.setEnabled(false); generation++; jobCancelled = true;vectorEpoch++;vectorQueued=false;clearTimeout(vectorTimer); clearTimeout(autoTimer); controller?.pause(); clearInjection(); }
 export function onEnable() { enabled = true;management?.setEnabled(true); return loadChat().catch(error => notice(error.message)); }
 export function onDelete() { onDisable(); }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => init().catch(error => console.error('[ConversationMemory]', error.message)), { once: true });

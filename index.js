@@ -236,7 +236,7 @@ async function testGeneration(btn) {
   }catch(error){status.textContent=E.failureReason(error,cfg);diagnostic=E.safeDiagnostic(error.diagnostic,cfg)||diagnostic;}
   finally{
     if(signature(settings())!==signature(cfg)){status.textContent='总结连接配置已变化，请重新测试';diagnostic=null;}
-    if(diagnostic)diagnosticView(host,{pluginVersion:'0.4.0',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
+    if(diagnostic)diagnosticView(host,{pluginVersion:'0.4.1',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
   }
 }
 async function fetchModels(btn,kind = 'summary') {
@@ -263,6 +263,7 @@ function shell() {
   box=management.dialog;const {memories,summary,connections,exchange:exchangePage,failures:failurePage}=management.panels,body=management.toolbar;
   memories.append(node('p', '按楼层整理经历，在回复前唤起相关记忆。char 与 user 各一条算一楼。', 'cm-muted'));
   const stats = node('p'); stats.dataset.cmStats = ''; stats.setAttribute('role', 'status'); memories.append(stats);
+  const counts=node('p');counts.dataset.cmChatCounts='';counts.className='cm-muted';memories.append(counts);
   const actions = node('div', null, 'cm-actions'); body.append(actions);
   button('补充总结', 'supplement', actions); button('暂停', 'pause', actions); button('整理核心记忆', 'digest', actions);
   const status = node('p', '配置总结 API 后，点击补充总结处理尚未总结的楼层。'); status.dataset.cmNotice = ''; status.setAttribute('role', 'status'); status.setAttribute('aria-live','polite'); body.append(status);
@@ -386,6 +387,7 @@ function renderStatus() {
   if (!box) return;
   const source=box.querySelector('[data-setting="summarySource"]');source.value=settings().summarySource;source.disabled=!state||job||Boolean(controller?.busy());
   const total = E.floors(chat()).length; const invalid = state ? E.invalidFrom(state, chat()) : -1;
+  const counts=E.chatCounts(chat());box.querySelector('[data-cm-chat-counts]').textContent=`酒馆当前已读取 ${counts.messages} 条记录，可总结 ${counts.floors} 楼（含 ${counts.hiddenDialogue} 楼从上下文隐藏的对话）；排除 ${counts.system} 条系统通知、${counts.tools} 条工具记录、${counts.unsupported} 条无文本记录。隐藏对话仍按原顺序总结；候选回复不重复计楼。`;
   const pending = (state?.failures || []).filter(row => row.status === 'pending').length;
   const cfg=settings(),old=historicalRemaining();box.querySelector('[data-cm-auto-policy]').textContent=state?.suspendAuto?'当前聊天自动总结已暂停。选择来源后点击补充总结，或重新开启自动总结。':!cfg.auto?'自动总结已关闭；仍可点击补充总结手动处理。':old&&!cfg.autoBackfill?`当前有 ${old} 楼旧聊天尚未检查，自动补旧聊天已关闭。请先手动补充总结，或明确开启自动补旧聊天。`:'自动总结已开启；新楼按触发阈值处理。'+(cfg.autoBackfill?'允许自动补齐尚未检查的旧楼；已失败批次仍需手动重试。':'旧楼已检查，不会自动重试旧失败批次。');
   box.querySelector('[data-cm-stats]').textContent = state ? `${context().name2} · 连续补齐 ${state.cursor} / ${total} 楼 · 已检查至 ${E.through(state)} 楼 · 已保存 ${state.periods.length} 条事件、${state.cores.length} 条核心记忆${E.through(state)<total?` · 下一批从 ${E.through(state)+1} 楼`:''}${pending ? ` · 待重试 ${pending} 批。失败楼层会阻挡连续进度，已保存的记忆仍可使用；请到「失败记录」手动重试。` : ''}${invalid >= 0 ? ` · 第 ${invalid + 1} 楼起来源有修改` : ''}` : '请选择单角色聊天';
@@ -410,7 +412,7 @@ function renderFailures() {
     for (const item of row.history || []) history.append(node('p', `第 ${item.attempt} 次 · ${new Date(item.at).toLocaleString()} · ${item.reason}`));
     article.append(history);
     if((row.history||[]).some(item=>item.diagnostic)){
-      const cfg=settings();diagnosticView(article,{pluginVersion:'0.4.0',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
+      const cfg=settings();diagnosticView(article,{pluginVersion:'0.4.1',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
     }else article.append(node('small','旧记录未保存响应结构；新版手动重试后可查看诊断。验证错误会直接显示具体校验原因。'));
     if (row.status === 'pending') { const retry = button('手动重试', 'retry-failure', article); retry.dataset.id = row.id; }
     host.append(article);
@@ -473,7 +475,7 @@ function setExportSelection(value) {if(!exportSnapshot)return;for(const check of
 function exportSelected() {
   available();if(!exportSnapshot||exportSnapshot.key!==activeKey)throw Error('请选择当前聊天的导出条目');
   const ctx=context(),data=E.selectExport(exportSnapshot.data,[...exportSnapshot.selected]);
-  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.4.0'}),'conversation-memory.json');
+  download(R.MemoryTransfer.serialize(data,{id:activeKey,name:ctx.name2,userName:ctx.name1,source:{application:'sillytavern',characterId:ctx.characters[ctx.characterId].avatar,chatId:ctx.getCurrentChatId?.()||ctx.chatId}},{name:'sillytavern-memory',version:'0.4.1'}),'conversation-memory.json');
   box.querySelector('[data-cm-export-status]').textContent=`已发起所选 ${exportSnapshot.selected.size} 条记忆的 JSON 下载。`;
 }
 async function clearCurrentMemory(btn) {

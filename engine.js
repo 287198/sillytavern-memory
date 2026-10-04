@@ -8,9 +8,22 @@
     summarySource: "auto", dateMode: "story", anchorFloor: 0, anchorDate: "", timezoneOffset: 0, apiUrl: "", apiKey: "", model: "", maxTokens: 4096, timeout: 90 };
   function copy(x) { return JSON.parse(JSON.stringify(x)); }
   function fingerprint(value) { return model.stableHash(value) + ":" + model.stableHash("source|" + value); }
+  function excludedReason(msg) {
+    if (!msg || typeof msg.mes !== 'string') return 'unsupported';
+    var extra=msg.extra||{},tools=extra.tool_invocations;
+    if (Array.isArray(tools) ? tools.length>0 : tools && typeof tools==='object' && Object.keys(tools).length>0) return 'tools';
+    // SillyTavern also marks context-hidden user/character dialogue as is_system.
+    if (msg.is_system && !msg.is_user && extra.type!=='narrator' &&
+      (extra.type || extra.uses_system_ui || !msg.name || msg.name==='System' || msg.name==='SillyTavern System')) return 'system';
+    return '';
+  }
+  function chatCounts(chat) {
+    var counts={messages:(chat||[]).length,floors:0,hiddenDialogue:0,system:0,tools:0,unsupported:0};
+    (chat||[]).forEach(function(msg){var reason=excludedReason(msg);if(reason)counts[reason]++;else{counts.floors++;if(msg.is_system)counts.hiddenDialogue++;}});return counts;
+  }
   function floors(chat) {
     return (chat || []).map(function (msg, index) {
-      if (!msg || msg.is_system || msg.extra && msg.extra.tool_invocations || typeof msg.mes !== "string") return null;
+      if (excludedReason(msg)) return null;
       var body = msg.mes;
       var stamp = msg.swipe_info && msg.swipe_info[msg.swipe_id] && msg.swipe_info[msg.swipe_id].send_date || msg.send_date;
       return { index: index, body: body, user: Boolean(msg.is_user), stamp: stamp, message: msg,
@@ -368,7 +381,7 @@
     }
     return { run: run, retry: retry, pause: function () { paused = true; }, busy: function () { return Boolean(running); } };
   }
-  root.ConversationMemoryEngine = { defaults: defaults, floors: floors, empty: empty, invalidFrom: invalidFrom, extract: extract,
+  root.ConversationMemoryEngine = { defaults: defaults, floors: floors, chatCounts: chatCounts, empty: empty, invalidFrom: invalidFrom, extract: extract,
     date: date, prepare: prepare, process: process, create: create, recall: recall, digest: digest, storeFor: storeFor,
     through: through, advanceCursor: advanceCursor, retryTask: retryTask, recordFailure: recordFailure, failureReason: failureReason, safeDiagnostic:safeDiagnostic,exportEntries:exportEntries,selectExport:selectExport,cleared:cleared };
 })(globalThis);

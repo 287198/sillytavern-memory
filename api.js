@@ -25,10 +25,6 @@
     return "";
   }
   function thinkingMode(settings) {
-    var mode=settings.summaryThinking||"auto";
-    if(mode==="enabled"||mode==="disabled")return mode;
-    if(mode==="inherit")return "server_default";
-    if(mode!=="auto")throw new Error("请选择有效的总结思考模式");
     var model=String(settings.model||"").replace(/[_\s]/g,"-");
     return /(?:^|\/)deepseek-(?:v4(?:\.1)?-)?(?:flash|pro)(?:$|[-:])/i.test(model)?"disabled":"server_default";
   }
@@ -84,8 +80,8 @@
     if(usage.completion_tokens_details&&Number.isFinite(usage.completion_tokens_details.reasoning_tokens))diagnostic.reasoningTokens=usage.completion_tokens_details.reasoning_tokens;
     if(typeof settings.onDiagnostic==="function")try{settings.onDiagnostic(diagnostic);}catch(ignore){}
     if (choice && (choice.finish_reason === "content_filter" || message.refusal)) throw failure("总结 API 拒绝处理本批内容（内容过滤或模型拒绝），可更换总结模型后手动重试","CONTENT_REFUSAL",diagnostic,settings);
-    if (choice&&choice.finish_reason === "length") throw failure(reasoning&&!content.trim()?"总结输出达到 token 上限：模型只有思考内容、还没有最终正文；请关闭思考模式或增加输出 token 上限":"总结输出被截断，请增加输出 token 上限或减少每批楼数","OUTPUT_TOKEN_LIMIT",diagnostic,settings);
-    if (!content.trim()) throw failure(reasoning?"总结 API 只返回思考内容，没有最终正文；请关闭思考模式，或提高输出 token 上限后重试":"总结 API 没有返回可用正文；请查看响应诊断中的结束原因和字段结构",reasoning?"REASONING_ONLY":"EMPTY_CONTENT",diagnostic,settings);
+    if (choice&&choice.finish_reason === "length") throw failure(reasoning&&!content.trim()?"总结输出达到 token 上限：模型只有思考内容、还没有最终正文；请增加输出 token 上限或减少每批楼数":"总结输出被截断，请增加输出 token 上限或减少每批楼数","OUTPUT_TOKEN_LIMIT",diagnostic,settings);
+    if (!content.trim()) throw failure(reasoning?"总结 API 只返回思考内容，没有最终正文；请提高输出 token 上限或更换总结模型后重试":"总结 API 没有返回可用正文；请查看响应诊断中的结束原因和字段结构",reasoning?"REASONING_ONLY":"EMPTY_CONTENT",diagnostic,settings);
     return content;
   }
   async function embed(settings,input) {

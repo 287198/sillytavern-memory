@@ -223,7 +223,7 @@ function diagnosticView(parent,report) {
 }
 async function testGeneration(btn) {
   const cfg=settings(),status=box.querySelector('[data-cm-generation-status]'),host=box.querySelector('[data-cm-generation-diagnostics]');
-  const signature=value=>JSON.stringify([value.apiUrl,value.apiKey,value.model,value.maxTokens,value.timeout,value.summaryThinking||'auto']);
+  const signature=value=>JSON.stringify([value.apiUrl,value.apiKey,value.model,value.maxTokens,value.timeout]);
   let diagnostic=null;btn.disabled=true;host.replaceChildren();status.textContent='正在实际调用总结模型…本次仅测试生成，不读取聊天，不写入记忆。';
   try{
     const content=await API.generate({...cfg,onDiagnostic:value=>{diagnostic=E.safeDiagnostic(value,cfg);}},'总结生成连接测试：请严格输出 JSON {"ok":true}，不需要解释。');
@@ -234,7 +234,7 @@ async function testGeneration(btn) {
   }catch(error){status.textContent=E.failureReason(error,cfg);diagnostic=E.safeDiagnostic(error.diagnostic,cfg)||diagnostic;}
   finally{
     if(signature(settings())!==signature(cfg)){status.textContent='总结连接配置已变化，请重新测试';diagnostic=null;}
-    if(diagnostic)diagnosticView(host,{pluginVersion:'0.3.3',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
+    if(diagnostic)diagnosticView(host,{pluginVersion:'0.3.4',operation:'generation-test',reason:status.textContent,diagnostic});btn.disabled=false;
   }
 }
 async function fetchModels(btn,kind = 'summary') {
@@ -274,10 +274,7 @@ function shell() {
   field(connect, 'apiKey', 'API Key', 'password'); field(connect, 'saveKey', '保存密钥到酒馆设置', 'checkbox', '未勾选时密钥仅在本次页面会话中使用。');
   connectionControls(connect,'summary','model','models');
   field(connect, 'model', '模型', 'text', '下拉选择会自动填入；服务不支持模型列表时可以手动填写。');
-  const thinkingLabel=node('label','总结思考模式','cm-field'),thinking=node('select');thinking.className='text_pole';thinking.dataset.setting='summaryThinking';thinking.setAttribute('aria-label','总结思考模式');
-  for(const [value,label] of [['auto','自动（DeepSeek Flash/V4 Pro 关闭思考）'],['disabled','关闭思考'],['enabled','开启思考'],['inherit','使用服务默认值']]){const option=node('option',label);option.value=value;thinking.append(option);}
-  thinking.value=settings().summaryThinking||'auto';thinkingLabel.append(thinking,node('small','自动模式仅对识别到的 DeepSeek Flash/V4 Pro 设置 thinking=disabled，其他模型沿用服务默认值。转发服务若不支持 thinking 参数，请选「使用服务默认值」。'));connect.append(thinkingLabel);
-  field(connect, 'maxTokens', '输出 token 上限', 'number','思考模型的预算可能包含思考 token；只有思考、没有最终正文时，请先关闭思考或增加上限。'); field(connect, 'timeout', '请求超时秒数', 'number');
+  field(connect, 'maxTokens', '输出 token 上限', 'number','仅保存最终总结。输出截断或没有最终正文时，可增加上限或减少每批楼数。'); field(connect, 'timeout', '请求超时秒数', 'number');
   button('测试总结生成','generation-test',connect);const generationStatus=node('p','模型列表连接成功后，还需要测试实际总结生成。');generationStatus.dataset.cmGenerationStatus='';generationStatus.setAttribute('role','status');generationStatus.setAttribute('aria-live','polite');connect.append(generationStatus);
   const generationDiagnostics=node('div');generationDiagnostics.dataset.cmGenerationDiagnostics='';connect.append(generationDiagnostics);
   const vectorPanel=details(connections,'向量模型与语义召回');
@@ -401,7 +398,7 @@ function renderFailures() {
     for (const item of row.history || []) history.append(node('p', `第 ${item.attempt} 次 · ${new Date(item.at).toLocaleString()} · ${item.reason}`));
     article.append(history);
     if((row.history||[]).some(item=>item.diagnostic)){
-      const cfg=settings();diagnosticView(article,{pluginVersion:'0.3.3',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
+      const cfg=settings();diagnosticView(article,{pluginVersion:'0.3.4',operation:row.operation,start:row.start,end:row.end,status:row.status,attempts:row.attempts,reason:E.failureReason(row.reason,cfg),history:(row.history||[]).slice(-30).map(item=>({attempt:item.attempt,at:new Date(item.at).toISOString(),reason:E.failureReason(item.reason,cfg),code:E.failureReason(item.code||'',cfg),stage:E.failureReason(item.stage||'',cfg),diagnostic:E.safeDiagnostic(item.diagnostic,cfg)}))});
     }else article.append(node('small','旧记录未保存响应结构；新版手动重试后可查看诊断。验证错误会直接显示具体校验原因。'));
     if (row.status === 'pending') { const retry = button('手动重试', 'retry-failure', article); retry.dataset.id = row.id; }
     host.append(article);
@@ -508,7 +505,7 @@ async function handle(btn) {
     available(); const ctx = context();
     download(R.MemoryTransfer.serialize(state, { id: activeKey, name: ctx.name2, userName: ctx.name1,
       source: { application: 'sillytavern', characterId: ctx.characters[ctx.characterId].avatar, chatId: ctx.getCurrentChatId?.() || ctx.chatId } },
-      { name: 'sillytavern-memory', version: '0.3.3' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
+      { name: 'sillytavern-memory', version: '0.3.4' }), 'conversation-memory.json');notice('记忆 JSON 下载已发起。'); return;
   }
   if (action === 'import') { idle(); const input = box.querySelector('[data-cm-file]'); input.value = ''; input.click();notice('请选择记忆 JSON；读取后会显示导入预览。'); return; }
   if (action === 'cancel-import') { pendingImport = null; box.querySelector('[data-cm-import]').replaceChildren();notice('已取消导入。'); return; }
